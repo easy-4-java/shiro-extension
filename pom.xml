@@ -48,7 +48,7 @@
         <guava.version>33.2.1-jre</guava.version>
         <junit.version>4.13.2</junit.version>
         <junit-jupiter.version>6.1.0</junit-jupiter.version>
-        <assertj.version>3.27.3</assertj.version>
+        <assertj.version>3.27.7</assertj.version>
         <mockito.version>4.11.0</mockito.version>
         <maven-surefire-plugin.version>3.5.2</maven-surefire-plugin.version>
         <java.version>17</java.version>
@@ -71,13 +71,14 @@
         <maven-source-plugin.version>3.4.0</maven-source-plugin.version>
         <maven-nexus-staging-plugin.version>1.7.0</maven-nexus-staging-plugin.version>
         <servlet-api.version>4.0.1</servlet-api.version>
-        <shiro.version>2.0.1</shiro.version>
+        <shiro.version>2.2.1</shiro.version>
         <shiro-redis.version>3.3.1</shiro-redis.version>
         <!-- Dependency versions -->
         <slf4j.version>2.0.18</slf4j.version>
-        <spring.version>5.3.36</spring.version>
-        <xstream.version>1.4.16</xstream.version>
-        <jackson-bom.version>2.22.1</jackson-bom.version>
+        <spring.version>6.2.19</spring.version>
+        <xstream.version>1.4.21</xstream.version>
+        <bouncycastle.version>1.85</bouncycastle.version>
+        <jackson-bom.version>2.22.3</jackson-bom.version>
         <maven-central-publishing-plugin.version>0.11.0</maven-central-publishing-plugin.version>
         <jacoco-maven-plugin.version>0.8.15</jacoco-maven-plugin.version>
         <lombok.version>1.18.46</lombok.version>
@@ -184,6 +185,11 @@
                 <artifactId>xstream</artifactId>
                 <version>${xstream.version}</version>
             </dependency>
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcprov-jdk18on</artifactId>
+                <version>${bouncycastle.version}</version>
+            </dependency>
             <!-- For Shiro -->
             <dependency>
                 <groupId>org.apache.shiro</groupId>
@@ -199,7 +205,12 @@
             <!-- For Spring Framework -->
             <dependency>
                 <groupId>org.springframework</groupId>
-                <artifactId>spring-webmvc</artifactId>
+                <artifactId>spring-web</artifactId>
+                <version>${spring.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-context</artifactId>
                 <version>${spring.version}</version>
             </dependency>
             <!-- Source: https://github.com/easy-4-java/jwt-issuer-api — easy4j jwt-issuer-api -->
