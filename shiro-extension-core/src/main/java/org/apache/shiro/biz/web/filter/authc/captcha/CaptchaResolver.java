@@ -18,7 +18,7 @@ package org.apache.shiro.biz.web.filter.authc.captcha;
 import org.apache.shiro.authc.AuthenticationException;
 import org.apache.shiro.biz.authc.token.CaptchaAuthenticationToken;
 
-import javax.servlet.ServletRequest;
+import jakarta.servlet.ServletRequest;
 
 /**
  * Captcha Resolver.

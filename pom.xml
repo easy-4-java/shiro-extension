@@ -132,8 +132,8 @@
             </dependency>
             <!-- For Servlet Api -->
             <dependency>
-                <groupId>javax.servlet</groupId>
-                <artifactId>javax.servlet-api</artifactId>
+                <groupId>jakarta.servlet</groupId>
+                <artifactId>jakarta.servlet-api</artifactId>
                 <version>${servlet-api.version}</version>
                 <scope>provided</scope>
             </dependency>
@@ -193,13 +193,21 @@
             <!-- For Shiro -->
             <dependency>
                 <groupId>org.apache.shiro</groupId>
+                <artifactId>shiro-core</artifactId>
+                <classifier>jakarta</classifier>
+                <version>${shiro.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.shiro</groupId>
                 <artifactId>shiro-web</artifactId>
+                <classifier>jakarta</classifier>
                 <version>${shiro.version}</version>
             </dependency>
             <!-- For Shiro Spring -->
             <dependency>
                 <groupId>org.apache.shiro</groupId>
                 <artifactId>shiro-spring</artifactId>
+                <classifier>jakarta</classifier>
                 <version>${shiro.version}</version>
             </dependency>
             <!-- For Spring Framework -->

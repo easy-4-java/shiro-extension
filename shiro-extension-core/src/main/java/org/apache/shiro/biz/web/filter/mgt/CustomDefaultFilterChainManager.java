@@ -12,8 +12,8 @@ import org.apache.shiro.web.filter.mgt.DefaultFilterChainManager;
 import org.apache.shiro.web.filter.mgt.NamedFilterList;
 import org.apache.shiro.web.filter.mgt.SimpleNamedFilterList;
 
-import javax.servlet.Filter;
-import javax.servlet.FilterChain;
+import jakarta.servlet.Filter;
+import jakarta.servlet.FilterChain;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;

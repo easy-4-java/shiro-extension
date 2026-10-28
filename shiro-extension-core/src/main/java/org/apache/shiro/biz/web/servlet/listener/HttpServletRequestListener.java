@@ -2,9 +2,9 @@ package org.apache.shiro.biz.web.servlet.listener;
 
 import org.apache.shiro.biz.utils.WebThreadContext;
 
-import javax.servlet.ServletRequestEvent;
-import javax.servlet.ServletRequestListener;
-import javax.servlet.http.HttpServletRequest;
+import jakarta.servlet.ServletRequestEvent;
+import jakarta.servlet.ServletRequestListener;
+import jakarta.servlet.http.HttpServletRequest;
 
 /**
  * Http Servlet Request Listener.

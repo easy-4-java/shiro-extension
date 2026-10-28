@@ -3,8 +3,8 @@ package org.apache.shiro.biz.web.filter.authc.listener;
 import org.apache.shiro.subject.Subject;
 import org.springframework.core.Ordered;
 
-import javax.servlet.ServletRequest;
-import javax.servlet.ServletResponse;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
 
 /**
  * Logout Listener.

@@ -15,8 +15,8 @@
  */
 package org.apache.shiro.biz.web.filter.authc;
 
-import javax.servlet.ServletRequest;
-import javax.servlet.ServletResponse;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
 
 /**
  * Authenticating Failure Counter.

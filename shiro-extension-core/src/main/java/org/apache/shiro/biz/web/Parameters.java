@@ -2,9 +2,9 @@ package org.apache.shiro.biz.web;
 
 import org.apache.shiro.biz.utils.StringUtils2;
 
-import javax.servlet.FilterConfig;
-import javax.servlet.ServletConfig;
-import javax.servlet.ServletContext;
+import jakarta.servlet.FilterConfig;
+import jakarta.servlet.ServletConfig;
+import jakarta.servlet.ServletContext;
 import java.util.LinkedHashMap;
 import java.util.Map;
 

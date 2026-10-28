@@ -18,8 +18,8 @@ package org.apache.shiro.biz.authz;
 import org.apache.shiro.authc.AuthenticationException;
 import org.springframework.core.Ordered;
 
-import javax.servlet.ServletRequest;
-import javax.servlet.ServletResponse;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
 import java.io.IOException;
 
 /**

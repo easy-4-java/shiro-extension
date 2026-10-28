@@ -17,11 +17,11 @@ package org.apache.shiro.biz.utils;
 
 import org.apache.shiro.util.ThreadContext;
 
-import javax.servlet.ServletContext;
-import javax.servlet.ServletRequest;
-import javax.servlet.ServletResponse;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpSession;
+import jakarta.servlet.ServletContext;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpSession;
 import java.util.Locale;
 
 /**
@@ -34,19 +34,19 @@ public class WebThreadContext extends ThreadContext {
     /**
      * Constant for the HTTP request object.
      */
-    public static final String HTTP_REQUEST = "javax.servlet.http.HttpServletRequest";
+    public static final String HTTP_REQUEST = "jakarta.servlet.http.HttpServletRequest";
     /**
      * Constant for the HTTP response object.
      */
-    public static final String HTTP_RESPONSE = "javax.servlet.http.HttpServletResponse";
+    public static final String HTTP_RESPONSE = "jakarta.servlet.http.HttpServletResponse";
     /**
      * Constant for the HTTP locale object.
      */
     public static final String HTTP_LOCALE = "java.util.Locale";
     /**
-     * Constant for the {@link javax.servlet.ServletContext servlet context} object.
+     * Constant for the {@link jakarta.servlet.ServletContext servlet context} object.
      */
-    public static final String SERVLET_CONTEXT = "javax.servlet.ServletContext";
+    public static final String SERVLET_CONTEXT = "jakarta.servlet.ServletContext";
     
 	/**
 	 * 绑定ServletContext对象到当前上下文

@@ -23,8 +23,8 @@ import org.apache.shiro.session.mgt.SimpleOnlineSession;
 import org.apache.shiro.web.session.mgt.WebSessionContext;
 import org.apache.shiro.web.util.WebUtils;
 
-import javax.servlet.ServletRequest;
-import javax.servlet.http.HttpServletRequest;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.http.HttpServletRequest;
 
 /**
  * @author [@Loong Wan](https://github.com/loong10k)

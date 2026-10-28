@@ -3,12 +3,12 @@ package org.apache.shiro.biz.web.servlet;
 import org.apache.shiro.SecurityUtils;
 import org.apache.shiro.web.util.WebUtils;
 
-import javax.servlet.ServletConfig;
-import javax.servlet.ServletException;
-import javax.servlet.ServletRequest;
-import javax.servlet.ServletResponse;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
+import jakarta.servlet.ServletConfig;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 
 /**
@@ -54,7 +54,7 @@ public abstract class AuthenticatingHttpServlet extends AbstractHttpServlet {
 	
     /**
      * Redirects to user to the previously attempted URL after a successful login.  This implementation simply calls
-     * <code>{@link org.apache.shiro.web.util.WebUtils WebUtils}.{@link WebUtils#redirectToSavedRequest(javax.servlet.ServletRequest, javax.servlet.ServletResponse, String) redirectToSavedRequest}</code>
+     * <code>{@link org.apache.shiro.web.util.WebUtils WebUtils}.{@link WebUtils#redirectToSavedRequest(jakarta.servlet.ServletRequest, jakarta.servlet.ServletResponse, String) redirectToSavedRequest}</code>
      * using the {@link #getSuccessUrl() successUrl} as the {@code fallbackUrl} argument to that call.
      *
      * @param request  the incoming request
@@ -67,8 +67,8 @@ public abstract class AuthenticatingHttpServlet extends AbstractHttpServlet {
 
     /**
      * <p>Convenience method for subclasses to use when a login redirect is required.</p>
-     * This implementation simply calls {@link #saveRequest(javax.servlet.ServletRequest) saveRequest(request)}
-     * and then {@link #redirectToLogin(javax.servlet.ServletRequest, javax.servlet.ServletResponse) redirectToLogin(request,response)}.
+     * This implementation simply calls {@link #saveRequest(jakarta.servlet.ServletRequest) saveRequest(request)}
+     * and then {@link #redirectToLogin(jakarta.servlet.ServletRequest, jakarta.servlet.ServletResponse) redirectToLogin(request,response)}.
      *
      * @param request  the incoming <code>ServletRequest</code>
      * @param response the outgoing <code>ServletResponse</code>
@@ -81,11 +81,11 @@ public abstract class AuthenticatingHttpServlet extends AbstractHttpServlet {
 
     /**
      * <p>Convenience method merely delegates to
-     * {@link WebUtils#saveRequest(javax.servlet.ServletRequest) WebUtils.saveRequest(request)} to save the request
+     * {@link WebUtils#saveRequest(jakarta.servlet.ServletRequest) WebUtils.saveRequest(request)} to save the request
      * state for reuse later.  This is mostly used to retain user request state when a redirect is issued to
      * return the user to their originally requested url/resource.</p>
      * If you need to save and then immediately redirect the user to login, consider using
-     * {@link #saveRequestAndRedirectToLogin(javax.servlet.ServletRequest, javax.servlet.ServletResponse)
+     * {@link #saveRequestAndRedirectToLogin(jakarta.servlet.ServletRequest, jakarta.servlet.ServletResponse)
      * saveRequestAndRedirectToLogin(request,response)} directly.
      *
      * @param request the incoming ServletRequest to save for re-use later (for example, after a redirect).
@@ -99,7 +99,7 @@ public abstract class AuthenticatingHttpServlet extends AbstractHttpServlet {
      * the request to that url.</p>
      * <b>N.B.</b>  If you want to issue a redirect with the intention of allowing the user to then return to their
      * originally requested URL, don't use this method directly.  Instead you should call
-     * {@link #saveRequestAndRedirectToLogin(javax.servlet.ServletRequest, javax.servlet.ServletResponse)
+     * {@link #saveRequestAndRedirectToLogin(jakarta.servlet.ServletRequest, jakarta.servlet.ServletResponse)
      * saveRequestAndRedirectToLogin(request,response)}, which will save the current request state so that it can
      * be reconstructed and re-used after a successful login.
      *
