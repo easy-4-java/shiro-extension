@@ -46,11 +46,11 @@ import org.springframework.context.support.MessageSourceAccessor;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.RequestMethod;
 
-import javax.servlet.ServletException;
-import javax.servlet.ServletRequest;
-import javax.servlet.ServletResponse;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.util.Collection;
 import java.util.List;
@@ -258,7 +258,7 @@ public abstract class AbstractAuthenticatingFilter extends FormAuthenticationFil
             ServletRequest request, ServletResponse response) throws IOException, ServletException {
 
     	WebUtils.toHttp(response).setStatus(HttpStatus.SC_OK);
-		response.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
+		response.setContentType(MediaType.APPLICATION_JSON_VALUE + ";charset=UTF-8");
 		
 		// Response Authentication status information
 		JSON.writeTo(response.getOutputStream(), AuthcResponse.success(messages.getMessage(AuthcResponseCode.SC_AUTHC_SUCCESS.getMsgKey())));
@@ -315,7 +315,7 @@ public abstract class AbstractAuthenticatingFilter extends FormAuthenticationFil
 		try {
 			
 			WebUtils.toHttp(response).setStatus(HttpStatus.SC_UNAUTHORIZED);
-			response.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
+			response.setContentType(MediaType.APPLICATION_JSON_VALUE + ";charset=UTF-8");
 			
 			// Response Authentication status information
 			JSON.writeTo(response.getOutputStream(), AuthcResponse.fail(messages.getMessage(AuthcResponseCode.SC_AUTHC_FAIL.getMsgKey())));

@@ -15,8 +15,8 @@ import org.apache.shiro.web.filter.AccessControlFilter;
 import org.apache.shiro.web.util.WebUtils;
 import org.springframework.http.MediaType;
 
-import javax.servlet.ServletRequest;
-import javax.servlet.ServletResponse;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -59,7 +59,7 @@ public class HttpServletSessionStatusFilter extends AccessControlFilter {
     	if (WebUtils2.isAjaxResponse(request)) {
 
 			WebUtils.toHttp(response).setStatus(HttpStatus.SC_UNAUTHORIZED);
-    		response.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
+		response.setContentType(MediaType.APPLICATION_JSON_VALUE + ";charset=UTF-8");
     		JSON.writeTo(response.getOutputStream(), AuthcResponse.error(mString));
     		
 		} else {

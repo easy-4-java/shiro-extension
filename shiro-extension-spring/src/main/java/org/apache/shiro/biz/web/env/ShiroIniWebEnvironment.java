@@ -24,7 +24,7 @@ import org.apache.shiro.web.filter.mgt.DefaultFilterChainManager;
 import org.apache.shiro.web.filter.mgt.FilterChainResolver;
 import org.apache.shiro.web.filter.mgt.PathMatchingFilterChainResolver;
 
-import javax.servlet.Filter;
+import jakarta.servlet.Filter;
 
 /**
  * @author [@Loong Wan](https://github.com/loong10k)

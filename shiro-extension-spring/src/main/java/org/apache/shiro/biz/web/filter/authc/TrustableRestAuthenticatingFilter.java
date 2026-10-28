@@ -28,8 +28,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
 
-import javax.servlet.ServletRequest;
-import javax.servlet.ServletResponse;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
 
 /**
  * Trustable Rest Authenticating Filter.
@@ -60,7 +60,7 @@ public class TrustableRestAuthenticatingFilter extends AbstractTrustableAuthenti
 				}
 
 				WebUtils.toHttp(response).setStatus(HttpStatus.SC_BAD_REQUEST);
-	    		response.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
+			response.setContentType(MediaType.APPLICATION_JSON_VALUE + ";charset=UTF-8");
 	    		JSON.writeTo(response.getOutputStream(), AuthcResponse.fail(mString));
 				return false;
 			}
@@ -74,7 +74,7 @@ public class TrustableRestAuthenticatingFilter extends AbstractTrustableAuthenti
 			
 			// 响应成功状态信息
 			WebUtils.toHttp(response).setStatus(HttpStatus.SC_BAD_REQUEST);
-    		response.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
+		response.setContentType(MediaType.APPLICATION_JSON_VALUE + ";charset=UTF-8");
     		JSON.writeTo(response.getOutputStream(), AuthcResponse.fail(mString));
 			
 			return false;

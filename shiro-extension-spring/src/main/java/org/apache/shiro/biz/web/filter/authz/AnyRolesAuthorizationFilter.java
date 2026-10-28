@@ -17,8 +17,8 @@ package org.apache.shiro.biz.web.filter.authz;
 
 import org.apache.shiro.subject.Subject;
 
-import javax.servlet.ServletRequest;
-import javax.servlet.ServletResponse;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
 
 /**
  * Any Roles Authorization Filter.

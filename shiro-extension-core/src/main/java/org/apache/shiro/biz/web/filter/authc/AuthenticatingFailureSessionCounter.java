@@ -18,8 +18,8 @@ package org.apache.shiro.biz.web.filter.authc;
 import org.apache.shiro.biz.utils.SubjectUtils;
 import org.apache.shiro.session.Session;
 
-import javax.servlet.ServletRequest;
-import javax.servlet.ServletResponse;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
 
 /**
  * Authenticating Failure Session Counter.

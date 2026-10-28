@@ -16,8 +16,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.context.support.MessageSourceAccessor;
 import org.springframework.http.MediaType;
 
-import javax.servlet.ServletRequest;
-import javax.servlet.ServletResponse;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
 import java.util.List;
 import java.util.Locale;
 
@@ -99,7 +99,7 @@ public abstract class AbstractLogoutFilter extends LogoutFilter {
 			// Response success status information
 
 			WebUtils.toHttp(response).setStatus(HttpStatus.SC_OK);
-    		response.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
+		response.setContentType(MediaType.APPLICATION_JSON_VALUE + ";charset=UTF-8");
     		
     		// Response logout status information
     		JSON.writeTo(response.getOutputStream(), AuthcResponse.logout(

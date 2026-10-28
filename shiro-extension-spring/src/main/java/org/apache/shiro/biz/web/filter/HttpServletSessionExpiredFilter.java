@@ -11,8 +11,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
 
-import javax.servlet.ServletRequest;
-import javax.servlet.ServletResponse;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
 import java.io.IOException;
 
 /**
@@ -41,7 +41,7 @@ public class HttpServletSessionExpiredFilter extends AccessControlFilter {
 		if (WebUtils2.isAjaxResponse(request)) {
 			WebUtils.toHttp(response).setHeader("session-status", "timeout");
 			WebUtils.toHttp(response).setStatus(HttpStatus.SC_FORBIDDEN);
-    		response.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
+		response.setContentType(MediaType.APPLICATION_JSON_VALUE + ";charset=UTF-8");
     		JSON.writeTo(response.getOutputStream(), AuthcResponse.error(mString));
 			return false;
 		} else {

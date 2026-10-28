@@ -14,10 +14,10 @@ import org.apache.shiro.web.filter.AccessControlFilter;
 import org.apache.shiro.web.util.WebUtils;
 import org.springframework.http.MediaType;
 
-import javax.servlet.FilterChain;
-import javax.servlet.ServletException;
-import javax.servlet.ServletRequest;
-import javax.servlet.ServletResponse;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
 import java.io.IOException;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -92,7 +92,7 @@ public class HttpServletRequestLimitWithPathFilter extends AccessControlFilter {
 							String mString = String.format("Request Forbidden! Requests per second exceeds %s limit.", entry.getValue());
 							if (WebUtils2.isAjaxResponse(request)) {
 								WebUtils.toHttp(response).setStatus(HttpStatus.SC_FORBIDDEN);
-					    		response.setContentType(MediaType.APPLICATION_JSON_UTF8_VALUE);
+							response.setContentType(MediaType.APPLICATION_JSON_VALUE + ";charset=UTF-8");
 					    		JSON.writeTo(response.getOutputStream(), AuthcResponse.error(mString));
 							} else {
 								WebUtils.toHttp(response).sendError(HttpStatus.SC_FORBIDDEN, mString);

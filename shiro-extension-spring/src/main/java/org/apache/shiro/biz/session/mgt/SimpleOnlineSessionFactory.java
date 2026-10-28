@@ -23,26 +23,27 @@ import org.apache.shiro.session.mgt.SimpleOnlineSession;
 import org.apache.shiro.web.session.mgt.WebSessionContext;
 import org.apache.shiro.web.util.WebUtils;
 
-import javax.servlet.ServletRequest;
-import javax.servlet.http.HttpServletRequest;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.http.HttpServletRequest;
 
 /**
  * @author [@Loong Wan](https://github.com/loong10k)
  */
-public class SimpleOnlineSessionFactory implements SessionFactory {  
-	  
-    @Override  
-    public Session createSession(SessionContext initData) {  
-        SimpleOnlineSession session = new SimpleOnlineSession();  
-        if (initData != null && initData instanceof WebSessionContext) {  
-            WebSessionContext sessionContext = (WebSessionContext) initData;  
-            ServletRequest request = sessionContext.getServletRequest();  
-            if ( request != null && request instanceof HttpServletRequest) {
-                session.setHost(WebUtils2.getRemoteAddr(request));
+public class SimpleOnlineSessionFactory implements SessionFactory {
+
+    @Override
+    public Session createSession(SessionContext initData) {
+        if (initData instanceof WebSessionContext) {
+            WebSessionContext sessionContext = (WebSessionContext) initData;
+            ServletRequest request = sessionContext.getServletRequest();
+            if (request instanceof HttpServletRequest) {
+                String host = WebUtils2.getRemoteAddr(request);
+                SimpleOnlineSession session = new SimpleOnlineSession(host);
                 session.setUserAgent(WebUtils.toHttp(request).getHeader("User-Agent"));
-                session.setSystemHost(WebUtils2.getRemoteAddr(request) + ":" + request.getLocalPort());
-            }  
-        }  
-        return session;  
-    }  
-}   
+                session.setSystemHost(host + ":" + request.getLocalPort());
+                return session;
+            }
+        }
+        return new SimpleOnlineSession();
+    }
+}

@@ -2,9 +2,9 @@ package org.apache.shiro.biz.web.servlet.http;
 
 import org.apache.commons.text.StringEscapeUtils;
 
-import javax.servlet.http.Cookie;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletRequestWrapper;
+import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletRequestWrapper;
 import java.util.Enumeration;
 import java.util.Iterator;
 import java.util.Map;
