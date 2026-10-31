@@ -70,7 +70,7 @@
         <maven-resources-plugin.version>3.5.0</maven-resources-plugin.version>
         <maven-source-plugin.version>3.4.0</maven-source-plugin.version>
         <maven-nexus-staging-plugin.version>1.7.0</maven-nexus-staging-plugin.version>
-        <servlet-api.version>4.0.1</servlet-api.version>
+        <servlet-api.version>6.0.0</servlet-api.version>
         <shiro.version>2.2.1</shiro.version>
         <shiro-redis.version>3.3.1</shiro-redis.version>
         <!-- Dependency versions -->
