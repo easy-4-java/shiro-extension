@@ -56,7 +56,7 @@ public class DefaultCredentialsMatcher extends CodecSupport implements Credentia
 		if (matches) {
 			cacheManager.getCache(getCredentialsRetryCacheName()).remove(token.getPrincipal());
 		}
-		return credentialsMatch(token, info);
+		return matches;
 	}
 
 	//匹配用户输入的token的凭证（未加密）与系统提供的凭证（已加密） 

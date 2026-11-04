@@ -109,11 +109,11 @@ public class CredentialsRetryLimitCredentialsMatcher extends HashedCredentialsMa
 		this.credentialsRetryCacheName = credentialsRetryCacheName;
 	}
 	
-	public void setCredentialsRetryTimes(Cache<Object, AtomicInteger> credentialsRetryTimes) {
+	public synchronized void setCredentialsRetryTimes(Cache<Object, AtomicInteger> credentialsRetryTimes) {
 		this.credentialsRetryTimes = credentialsRetryTimes;
 	}
 
-	private Cache<Object, AtomicInteger> getCredentialsRetryCacheLazy() {
+	private synchronized Cache<Object, AtomicInteger> getCredentialsRetryCacheLazy() {
         if (this.credentialsRetryTimes == null) {
             this.credentialsRetryTimes = createCredentialsRetryCache();
         }

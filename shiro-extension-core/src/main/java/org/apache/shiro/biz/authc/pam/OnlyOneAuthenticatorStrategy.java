@@ -18,7 +18,6 @@ package org.apache.shiro.biz.authc.pam;
 import org.apache.shiro.authc.AuthenticationException;
 import org.apache.shiro.authc.AuthenticationInfo;
 import org.apache.shiro.authc.AuthenticationToken;
-import org.apache.shiro.authc.SimpleAuthenticationInfo;
 import org.apache.shiro.authc.pam.AbstractAuthenticationStrategy;
 import org.apache.shiro.biz.utils.StringUtils2;
 import org.apache.shiro.realm.Realm;
@@ -40,7 +39,7 @@ public class OnlyOneAuthenticatorStrategy extends AbstractAuthenticationStrategy
 	public AuthenticationInfo beforeAllAttempts(Collection<? extends Realm> realms, AuthenticationToken token)
 			throws AuthenticationException {
 		// 返回一个权限的认证信息
-		return new SimpleAuthenticationInfo();
+		return new RealmAuthenticationInfo();
 	}
 
 	/** 在每个Realm之前调用 */
@@ -65,7 +64,9 @@ public class OnlyOneAuthenticatorStrategy extends AbstractAuthenticationStrategy
 				info = singleRealmInfo;
 			} else {
 				info = merge(singleRealmInfo, aggregateInfo);
-				if (info.getPrincipals().getRealmNames().size() > 1) {
+				if (info.getPrincipals().getRealmNames().size() > 1
+                        || (info instanceof RealmAuthenticationInfo
+                        && ((RealmAuthenticationInfo) info).getSuccessfulRealms() > 1)) {
 					LOG.debug("RealmNames:" + StringUtils2.join(info.getPrincipals().getRealmNames(), ","));
 					throw new AuthenticationException("Authentication token of type [" + token.getClass() + "] "
 							+ "could not be authenticated by any configured realms.  Please ensure that only one realm can "
@@ -80,6 +81,14 @@ public class OnlyOneAuthenticatorStrategy extends AbstractAuthenticationStrategy
 	@Override
 	public AuthenticationInfo afterAllAttempts(AuthenticationToken token, AuthenticationInfo aggregate)
 			throws AuthenticationException {
-		return aggregate;
-	}
+        if (aggregate == null || aggregate.getPrincipals() == null
+                || aggregate.getPrincipals().isEmpty()
+                || aggregate.getPrincipals().getRealmNames().size() != 1
+                || (aggregate instanceof RealmAuthenticationInfo
+                    && ((RealmAuthenticationInfo) aggregate).getSuccessfulRealms() != 1)) {
+            throw new AuthenticationException("Exactly one realm must authenticate the token.");
+        }
+        return aggregate;
+    }
+
 }
