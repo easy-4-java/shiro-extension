@@ -164,6 +164,87 @@ public class AuthenticationStrategySafetyTest {
             for (java.util.concurrent.Future<Boolean> result : results) assertTrue(result.get(5, java.util.concurrent.TimeUnit.SECONDS));
         } finally { pool.shutdownNow(); }
     }
+    @Test public void oneSuccessfulRealmCannotPretendToBeTwoByReturningTwoRealmNames() {
+        SimpleAuthenticationInfo misleading = new SimpleAuthenticationInfo("alice", "secret", "one");
+        ((org.apache.shiro.subject.MutablePrincipalCollection) misleading.getPrincipals()).add("alice", "claimed-two");
+        DefaultModularRealmAuthenticator authenticator = auth(new CachedRealm("one", misleading), new SwitchableRealm("two", true, false));
+        authenticator.setAuthenticationStrategy(new AtLeastTwoAuthenticatorStrategy());
+        assertSubjectRejected(authenticator);
+    }
+    @Test public void emptyRealmResultsRejectWithAuthenticationFailureRatherThanNullPointer() {
+        SimpleAuthenticationInfo nullPrincipals = new SimpleAuthenticationInfo();
+        SimpleAuthenticationInfo emptyPrincipals = new SimpleAuthenticationInfo();
+        emptyPrincipals.setPrincipals(new org.apache.shiro.subject.SimplePrincipalCollection());
+        for (SimpleAuthenticationInfo empty : Arrays.asList(nullPrincipals, emptyPrincipals)) {
+            DefaultModularRealmAuthenticator authenticator = auth(new CachedRealm("one", empty), new CachedRealm("two", empty));
+            authenticator.setAuthenticationStrategy(new OnlyOneAuthenticatorStrategy());
+            AuthenticationException failure = assertThrows(AuthenticationException.class, () -> authenticator.authenticate(token));
+            assertNull("strategy must explicitly reject instead of wrapping a null pointer", failure.getCause());
+            assertSubjectRejected(authenticator);
+        }
+    }
+    @Test public void malformedRealmResultRejectsEvenAlongsideValidRealm() {
+        for (boolean emptyFirst : new boolean[]{false, true}) {
+            Realm empty = new CachedRealm("empty", new SimpleAuthenticationInfo());
+            Realm valid = passwordRealm("valid");
+            DefaultModularRealmAuthenticator authenticator = emptyFirst ? auth(empty, valid) : auth(valid, empty);
+            authenticator.setAuthenticationStrategy(new OnlyOneAuthenticatorStrategy());
+            assertSubjectRejected(authenticator);
+        }
+    }
+    @Test public void onlyOneCallbackExplicitlyRejectsMalformedRealmResult() {
+        OnlyOneAuthenticatorStrategy strategy = new OnlyOneAuthenticatorStrategy();
+        AuthenticationInfo aggregate = strategy.beforeAllAttempts(Collections.emptyList(), token);
+        assertThrows(AuthenticationException.class,
+                () -> strategy.afterAttempt(null, token, new SimpleAuthenticationInfo(), aggregate, null));
+        assertThrows(AuthenticationException.class, () -> strategy.afterAllAttempts(token, aggregate));
+    }
+    @Test public void reusedCachedSetCredentialsAndPrincipalsRemainIsolatedBetweenRequests() {
+        Set<String> firstCredentials = Collections.unmodifiableSet(new LinkedHashSet<>(Collections.singleton("first")));
+        Set<String> secondCredentials = Collections.unmodifiableSet(new LinkedHashSet<>(Collections.singleton("second")));
+        SimpleAuthenticationInfo first = new SimpleAuthenticationInfo("alice", firstCredentials, "one");
+        SimpleAuthenticationInfo second = new SimpleAuthenticationInfo("alice", secondCredentials, "two");
+        CachedRealm firstRealm = new CachedRealm("one", first);
+        CachedRealm secondRealm = new CachedRealm("two", second);
+        DefaultModularRealmAuthenticator authenticator = auth(firstRealm, secondRealm);
+        authenticator.setAuthenticationStrategy(new AtLeastTwoAuthenticatorStrategy());
+        AuthenticationInfo merged = authenticator.authenticate(token);
+        assertTrue(merged.getCredentials() instanceof Set<?>);
+        assertEquals(new LinkedHashSet<>(Arrays.asList("first", "second")), merged.getCredentials());
+        assertNotSame(firstCredentials, merged.getCredentials());
+        assertCachedUnchanged(first, second);
+        secondRealm.supported = false;
+        assertSubjectRejected(authenticator);
+        assertCachedUnchanged(first, second);
+    }
+    @Test public void onlyOneFailureDoesNotPolluteCachedInfoOrTheNextRequest() {
+        SimpleAuthenticationInfo first = new SimpleAuthenticationInfo("alice", Collections.unmodifiableSet(Collections.singleton("first")), "one");
+        SimpleAuthenticationInfo second = new SimpleAuthenticationInfo("alice", Collections.unmodifiableSet(Collections.singleton("second")), "two");
+        CachedRealm firstRealm = new CachedRealm("one", first);
+        CachedRealm secondRealm = new CachedRealm("two", second);
+        DefaultModularRealmAuthenticator authenticator = auth(firstRealm, secondRealm);
+        authenticator.setAuthenticationStrategy(new OnlyOneAuthenticatorStrategy());
+        assertSubjectRejected(authenticator);
+        assertCachedUnchanged(first, second);
+        secondRealm.supported = false;
+        assertSubjectAccepted(authenticator);
+        assertCachedUnchanged(first, second);
+    }
+    private static void assertCachedUnchanged(AuthenticationInfo first, AuthenticationInfo second) {
+        assertEquals(Collections.singleton("one"), first.getPrincipals().getRealmNames());
+        assertEquals(Collections.singleton("two"), second.getPrincipals().getRealmNames());
+        assertEquals(Collections.singleton("first"), first.getCredentials());
+        assertEquals(Collections.singleton("second"), second.getCredentials());
+    }
+    private static final class CachedRealm implements Realm {
+        private final String name;
+        private final AuthenticationInfo cached;
+        private boolean supported = true;
+        private CachedRealm(String name, AuthenticationInfo cached) { this.name = name; this.cached = cached; }
+        public String getName() { return name; }
+        public boolean supports(AuthenticationToken token) { return supported; }
+        public AuthenticationInfo getAuthenticationInfo(AuthenticationToken token) { return cached; }
+    }
     private void assertSubjectRejected(DefaultModularRealmAuthenticator authenticator) {
         DefaultSecurityManager manager = new DefaultSecurityManager();
         manager.setAuthenticator(authenticator);

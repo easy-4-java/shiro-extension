@@ -56,6 +56,12 @@ public class OnlyOneAuthenticatorStrategy extends AbstractAuthenticationStrategy
 	@Override
 	public AuthenticationInfo afterAttempt(Realm realm, AuthenticationToken token, AuthenticationInfo singleRealmInfo,
 			AuthenticationInfo aggregateInfo, Throwable t) throws AuthenticationException {
+        // A non-null realm result must identify an account. Reject malformed
+        // results explicitly rather than leaking a null pointer from aggregation.
+        if (singleRealmInfo != null && (singleRealmInfo.getPrincipals() == null
+                || singleRealmInfo.getPrincipals().isEmpty())) {
+            throw new AuthenticationException("Realm returned authentication information without principals.");
+        }
 		AuthenticationInfo info;
 		if (singleRealmInfo == null) {
 			info = aggregateInfo;
