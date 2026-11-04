@@ -20,12 +20,18 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: easy-4-java/jwt-issuer
-          ref: fe29ffd8471eff70d2117b73e4cb2459e5ec4a2f
+          ref: 6b1a4de65a12a155e98e957ea82e446ef6420b36
           path: .ci-dependencies/jwt-issuer
       - name: Verify and install JWT issuer
         run: mvn -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" -f .ci-dependencies/jwt-issuer/pom.xml clean install
       - name: Verify Shiro extension
         run: mvn -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" clean verify
+      - name: Require coverage for modules with existing tests
+        run: |
+          test -s .ci-dependencies/jwt-issuer/jwt-issuer-with-jjwt/target/jacoco.exec
+          test -s .ci-dependencies/jwt-issuer/jwt-issuer-with-jjwt/target/site/jacoco/jacoco.xml
+          test -s shiro-extension-core/target/jacoco.exec
+          test -s shiro-extension-core/target/site/jacoco/jacoco.xml
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -34,3 +40,4 @@ jobs:
             **/target/surefire-reports/**
             **/target/site/jacoco/**
             .ci-dependencies/**/target/surefire-reports/**
+            .ci-dependencies/**/target/site/jacoco/**
