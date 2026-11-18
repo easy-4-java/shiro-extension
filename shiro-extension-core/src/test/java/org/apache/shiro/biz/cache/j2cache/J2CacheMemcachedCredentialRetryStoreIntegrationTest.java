@@ -34,6 +34,7 @@ import net.rubyeye.xmemcached.transcoders.SerializingTranscoder;
 import net.rubyeye.xmemcached.transcoders.StringTranscoder;
 import net.rubyeye.xmemcached.utils.AddrUtil;
 import org.apache.shiro.biz.authc.credential.CredentialRetryStore.Attempt;
+import org.apache.shiro.cache.CacheException;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -41,6 +42,7 @@ import org.junit.Test;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeTrue;
@@ -58,8 +60,8 @@ public class J2CacheMemcachedCredentialRetryStoreIntegrationTest {
         String port = System.getProperty("shiro.memcached.test.port");
         assumeTrue("Supply an isolated Memcached port", Objects.nonNull(port));
         endpoint = "127.0.0.1:" + port;
-        firstClient = client();
-        secondClient = client();
+        firstClient = client(endpoint);
+        secondClient = client(endpoint);
     }
 
     @After
@@ -189,6 +191,35 @@ public class J2CacheMemcachedCredentialRetryStoreIntegrationTest {
     }
 
     @Test
+    public void refusesToImportWhenOnlyTheBinaryProtocolCanReadTheCounter() throws Exception {
+        String binaryPort = System.getProperty("shiro.memcached.binary.test.port");
+        assumeTrue("Supply an isolated binary-only Memcached port", Objects.nonNull(binaryPort));
+        String binaryEndpoint = "127.0.0.1:" + binaryPort;
+        SerializationUtils.init("java", new Properties());
+        J2CacheConfig config = config(true, "30s");
+        String principal = "binary-cutover-" + UUID.randomUUID();
+        String legacyKey = REGION + ":" + principal;
+        String target = "shiro-retry:" + digest(namespace) + ":" + digest(principal);
+        SerializingTranscoder transcoder = new SerializingTranscoder();
+        byte[] counter = SerializationUtils.serialize(new AtomicInteger(3));
+        MemcachedClient legacy = client(binaryEndpoint);
+        try (CacheChannel channel = J2CacheTestChannel.open(config)) {
+            assertTrue(legacy.set(legacyKey, 120, counter, transcoder));
+            byte[] storedCounter = (byte[]) legacy.get(legacyKey, transcoder);
+            assertEquals(3, ((AtomicInteger) SerializationUtils.deserialize(storedCounter)).get());
+            long originalCas = legacy.gets(legacyKey, transcoder).getCas();
+
+            J2CacheMemcachedCredentialRetryStore store = store(channel, config, firstClient);
+            assertThrows(CacheException.class,
+                    () -> store.migrateLegacyWindow(principal, AddrUtil.getOneAddress(binaryEndpoint)));
+            assertNull(firstClient.get(target, new StringTranscoder()));
+            assertEquals(originalCas, legacy.gets(legacyKey, transcoder).getCas());
+        } finally {
+            legacy.shutdown();
+        }
+    }
+
+    @Test
     public void keepsTheOriginalRegionDeadlineAfterAnUpdate() throws Exception {
         J2CacheConfig config = config(true, "4s");
         try (CacheChannel first = J2CacheTestChannel.open(config); CacheChannel second = J2CacheTestChannel.open(config)) {
@@ -253,8 +284,8 @@ public class J2CacheMemcachedCredentialRetryStoreIntegrationTest {
         return config;
     }
 
-    private MemcachedClient client() throws Exception {
-        var builder = new XMemcachedClientBuilder(AddrUtil.getAddresses(endpoint));
+    private MemcachedClient client(String server) throws Exception {
+        var builder = new XMemcachedClientBuilder(AddrUtil.getAddresses(server));
         builder.setCommandFactory(new BinaryCommandFactory());
         return builder.build();
     }
