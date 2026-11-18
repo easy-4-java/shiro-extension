@@ -76,6 +76,10 @@ public final class JCacheCredentialRetryStore implements CredentialRetryStore {
 
         @Override
         public Boolean process(MutableEntry<Object, Object> entry, Object... arguments) {
+            // Checking existence first keeps a read-through loader from recreating an expired entry.
+            if (!entry.exists()) {
+                return false;
+            }
             Object value = entry.getValue();
             if (value instanceof Attempt) {
                 entry.setValue(new AtomicInteger(((Attempt) value).getCount()));
