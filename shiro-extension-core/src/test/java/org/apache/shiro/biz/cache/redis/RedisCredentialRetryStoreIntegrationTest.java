@@ -20,6 +20,7 @@ import org.junit.Before;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeTrue;
@@ -90,6 +91,18 @@ public class RedisCredentialRetryStoreIntegrationTest {
         assertEquals(2, store.reserve("alice").getCount());
         store.clearIfCurrent("alice", second.getWindowId());
         assertEquals(1, store.reserve("alice").getCount());
+    }
+
+    @Test
+    public void importsPersistentZeroCounterAndRejectsAnAlreadyExpiredWindow() {
+        RedisCredentialRetryStore store = newStore(Duration.ofSeconds(20));
+        assertFalse(store.importFixedWindow("expired", 3, 1));
+        assertEquals("0", redis("EXISTS", key("expired")));
+        assertTrue(store.importFixedWindow("persistent", 0, 0));
+        assertEquals(1, store.reserve("persistent").getCount());
+        assertEquals("-1", redis("PTTL", key("persistent")));
+        assertFalse(store.importFixedWindow("persistent", 99, 0));
+        assertEquals(2, store.reserve("persistent").getCount());
     }
 
     @Test

@@ -22,6 +22,7 @@ import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactor
 import org.springframework.data.redis.serializer.StringRedisSerializer;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeTrue;
@@ -51,6 +52,29 @@ public class SpringDataRedis4CredentialRetryStoresIntegrationTest {
         if (Objects.nonNull(first)) {
             first.destroy();
         }
+    }
+
+    @Test
+    public void copiesLegacyWindowBeforeIdlePolicyRefreshesIt() {
+        var config = RedisCacheConfiguration.defaultCacheConfig()
+                .computePrefixWith(name -> namespace + ":legacy:")
+                .entryTtl((key, value) -> Objects.isNull(value) ? Duration.ofSeconds(30) : Duration.ofSeconds(5))
+                .enableTimeToIdle();
+        var manager = RedisCacheManager.builder(first).cacheDefaults(config).transactionAware().build();
+        manager.afterPropertiesSet();
+        var source = manager.getCache(REGION);
+        source.put("principal", new AtomicInteger(3));
+        long originalDeadline = expiry("legacy:principal");
+
+        assertTrue(SpringDataRedis4CredentialRetryStores.migrateLegacyWindow(
+                source, first, namespace, Object::toString, "principal"));
+        assertEquals(originalDeadline, expiry("legacy:principal"));
+        assertEquals(originalDeadline, expiry("principal"));
+        assertFalse(SpringDataRedis4CredentialRetryStores.migrateLegacyWindow(
+                source, second, namespace, Object::toString, "principal"));
+        Attempt next = store(second, config).reserve("principal");
+        assertEquals(4, next.getCount());
+        assertTrue(expiry("principal") > originalDeadline);
     }
 
     @Test
