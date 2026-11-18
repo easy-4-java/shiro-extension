@@ -19,6 +19,7 @@ import org.apache.shiro.cache.CacheException;
 public final class JCacheCredentialRetryStore implements CredentialRetryStore {
 
     private final Cache<Object, Object> cache;
+    private final boolean acceptsLegacyCounters;
 
     /**
      * @param cache shared retry cache using store-by-value and a nonzero creation expiry
@@ -36,6 +37,7 @@ public final class JCacheCredentialRetryStore implements CredentialRetryStore {
         }
         // Provider configuration validates the values that the entry processor writes.
         this.cache = (Cache<Object, Object>) cache;
+        this.acceptsLegacyCounters = configuration.getValueType().isAssignableFrom(AtomicInteger.class);
         ExpiryPolicy policy = configuration.getExpiryPolicyFactory().create();
         Duration creation = policy.getExpiryForCreation();
         if (!configuration.isStoreByValue() || Objects.isNull(creation) || creation.isZero()
@@ -52,6 +54,35 @@ public final class JCacheCredentialRetryStore implements CredentialRetryStore {
     @Override
     public void clearIfCurrent(Object principal, String windowId) {
         cache.invoke(principal, Clear.INSTANCE, Objects.requireNonNull(windowId, "windowId"));
+    }
+
+    /**
+     * Restores a live retry window to the legacy counter format in the same entry.
+     * Pause old and new retry clients and drain outstanding writes before restoring.
+     *
+     * @param principal original principal key in the shared retry region
+     * @return true when an active retry window was restored without changing its count or deadline
+     * @throws IllegalStateException when the region cannot store legacy counters
+     */
+    public boolean restoreLegacyWindow(Object principal) {
+        if (!acceptsLegacyCounters) {
+            throw new IllegalStateException("JCache retry region must accept legacy counters for restore");
+        }
+        return cache.invoke(principal, RestoreLegacy.INSTANCE);
+    }
+
+    private enum RestoreLegacy implements EntryProcessor<Object, Object, Boolean> {
+        INSTANCE;
+
+        @Override
+        public Boolean process(MutableEntry<Object, Object> entry, Object... arguments) {
+            Object value = entry.getValue();
+            if (value instanceof Attempt) {
+                entry.setValue(new AtomicInteger(((Attempt) value).getCount()));
+                return true;
+            }
+            return false;
+        }
     }
 
     private enum Reserve implements EntryProcessor<Object, Object, Attempt> {
