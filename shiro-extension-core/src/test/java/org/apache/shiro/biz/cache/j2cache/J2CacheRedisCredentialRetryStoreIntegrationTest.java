@@ -6,7 +6,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import net.oschina.j2cache.CacheChannel;
-import net.oschina.j2cache.CacheProviderHolder;
 import net.oschina.j2cache.J2CacheConfig;
 import org.apache.shiro.biz.authc.credential.CredentialRetryStore.Attempt;
 import org.junit.Before;
@@ -34,7 +33,7 @@ public class J2CacheRedisCredentialRetryStoreIntegrationTest {
     @Test
     public void twoChannelsShareCountsAndPreserveTheSyncedRegionDeadline() throws Exception {
         J2CacheConfig config = config(true, "generic");
-        try (CacheChannel first = open(config); CacheChannel second = open(config);
+        try (CacheChannel first = J2CacheTestChannel.open(config); CacheChannel second = J2CacheTestChannel.open(config);
              Jedis redis = new Jedis("127.0.0.1", port)) {
             var a = store(first, config);
             var b = store(second, config);
@@ -71,7 +70,7 @@ public class J2CacheRedisCredentialRetryStoreIntegrationTest {
     public void retainsPersistenceWhenTtlSyncIsDisabledOrRedisUsesHashStorage() {
         try (Jedis redis = new Jedis("127.0.0.1", port)) {
             for (J2CacheConfig config : new J2CacheConfig[] {config(false, "generic"), config(true, "hash")}) {
-                try (CacheChannel channel = open(config)) {
+                try (CacheChannel channel = J2CacheTestChannel.open(config)) {
                     var store = store(channel, config);
                     Attempt initial = store.reserve("principal");
                     assertEquals(-1L, expiry(redis));
@@ -104,17 +103,5 @@ public class J2CacheRedisCredentialRetryStoreIntegrationTest {
         config.getL2CacheProperties().setProperty("namespace", namespace + ":legacy");
         config.getL2CacheProperties().setProperty("storage", storage);
         return config;
-    }
-
-    private static CacheChannel open(J2CacheConfig config) {
-        return new CacheChannel(config, CacheProviderHolder.init(config, (region, key) -> { })) {
-            @Override
-            protected void sendClearCmd(String region) {
-            }
-
-            @Override
-            protected void sendEvictCmd(String region, String... keys) {
-            }
-        };
     }
 }

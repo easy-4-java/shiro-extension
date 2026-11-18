@@ -1,9 +1,7 @@
 package org.apache.shiro.biz.cache.j2cache;
 
-import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
-import java.util.UUID;
 import java.util.function.Function;
 import net.oschina.j2cache.CacheChannel;
 import net.oschina.j2cache.J2CacheConfig;
@@ -42,7 +40,7 @@ public final class J2CacheRedisCredentialRetryStore implements CredentialRetrySt
         RedisClient client = provider.getRedisClient();
         this.delegate = new RedisCredentialRetryStore(
                 (script, keys, args) -> eval(client, script, keys, args),
-                namespace, principalKey, expiry(channel, config, region));
+                namespace, principalKey, J2CacheRetryExpiry.resolve(channel, config, region, "generic"));
     }
 
     /**
@@ -60,7 +58,7 @@ public final class J2CacheRedisCredentialRetryStore implements CredentialRetrySt
         Objects.requireNonNull(cluster, "cluster");
         this.delegate = new RedisCredentialRetryStore(
                 (script, keys, args) -> (String) cluster.eval(script, keys, args),
-                namespace, principalKey, expiry(channel, config, region));
+                namespace, principalKey, J2CacheRetryExpiry.resolve(channel, config, region, "generic"));
     }
 
     @Override
@@ -79,21 +77,6 @@ public final class J2CacheRedisCredentialRetryStore implements CredentialRetrySt
             return provider;
         }
         throw new IllegalArgumentException("J2Cache retry state requires a writable Jedis provider");
-    }
-
-    private static Duration expiry(CacheChannel channel, J2CacheConfig config, String region) {
-        if (!config.isSyncTtlToRedis()
-                || "hash".equalsIgnoreCase(config.getL2CacheProperties().getProperty("storage"))) {
-            return Duration.ZERO;
-        }
-        // Resolve the region through the channel so defaults and its existing listener are applied.
-        channel.check(region, "__shiro_retry_region_probe__" + UUID.randomUUID());
-        long seconds = channel.regions().stream()
-                .filter(candidate -> region.equals(candidate.getName()))
-                .findFirst()
-                .orElseThrow(() -> new IllegalArgumentException("J2Cache retry region TTL is unavailable"))
-                .getTtl();
-        return Duration.ofSeconds(Math.max(0L, seconds));
     }
 
     private static String eval(RedisClient client, String script, List<String> keys, List<String> args) {
