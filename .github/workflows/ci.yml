@@ -75,6 +75,47 @@ jobs:
           -Dshiro.memcached.test.port="${RETRY_MEMCACHED_PORT}"
           clean verify
 
+      - name: Verify J2Cache and Redisson retry migration on Redis Cluster
+        shell: bash
+        run: |
+          set -euo pipefail
+          containers=()
+          trap 'if (( ${#containers[@]} > 0 )); then docker rm -f "${containers[@]}" >/dev/null; fi' EXIT
+          nodes=()
+          for port in 16380 16381 16382; do
+            container=$(docker run -d --rm --network host redis:8.4.0 redis-server \
+              --bind 127.0.0.1 --port "$port" --cluster-enabled yes \
+              --cluster-announce-ip 127.0.0.1 --cluster-config-file nodes.conf \
+              --save '' --appendonly no)
+            containers+=("$container")
+            nodes+=("127.0.0.1:$port")
+            for attempt in {1..60}; do
+              if docker exec "$container" redis-cli -p "$port" ping | grep -qx PONG; then
+                break
+              fi
+              if (( attempt == 60 )); then
+                docker logs "$container"
+                exit 1
+              fi
+              sleep 0.25
+            done
+          done
+          timeout 30s docker exec "${containers[0]}" redis-cli --cluster create "${nodes[@]}" --cluster-replicas 0 --cluster-yes
+          cluster_nodes=$(IFS=,; printf '%s' "${nodes[*]}")
+          sh ./mvnw -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" \
+            -pl shiro-extension-core -Dshiro.redis.test.cluster.nodes="$cluster_nodes" \
+            '-Dtest=J2CacheRedisClusterMigrationTest,RedissonCredentialRetryStoreIntegrationTest#migratesTheLegacyMapEntryWithoutRefreshingItsIdleDeadline+keepsMapExpiryAndImportsPersistentZeroCounts' test
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          report = Path("shiro-extension-core/target/surefire-reports")
+          for name in ("J2CacheRedisClusterMigrationTest", "RedissonCredentialRetryStoreIntegrationTest"):
+              suite = ElementTree.parse(next(report.glob(f"TEST-*{name}.xml"))).getroot()
+              if tuple(suite.get(key) for key in ("tests", "failures", "errors", "skipped")) != ("2", "0", "0", "0"):
+                  raise SystemExit(f"Expected two Redis Cluster migration tests without skips in {name}")
+          PYTHON
+
       - name: Require coverage for modules with tests
         run: |
           for module in shiro-extension-core shiro-extension-spring shiro-extension-hazelcast3; do
