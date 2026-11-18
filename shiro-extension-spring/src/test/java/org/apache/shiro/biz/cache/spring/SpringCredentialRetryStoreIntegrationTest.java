@@ -24,11 +24,13 @@ import org.apache.shiro.authc.UsernamePasswordToken;
 import org.apache.shiro.biz.authc.credential.CredentialRetryStore;
 import org.apache.shiro.biz.authc.credential.CredentialRetryStore.Attempt;
 import org.apache.shiro.biz.authc.credential.DefaultCredentialsMatcher;
+import org.apache.shiro.biz.authc.credential.spring.CredentialRetryStoreAutoConfiguration;
 import org.apache.shiro.cache.CacheException;
 import org.junit.Test;
 import org.springframework.cache.concurrent.ConcurrentMapCache;
 import org.springframework.cache.jcache.JCacheCacheManager;
 import org.springframework.cache.support.SimpleCacheManager;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.data.redis.cache.RedisCacheConfiguration;
 import org.springframework.data.redis.cache.RedisCacheManager;
 import org.springframework.data.redis.connection.RedisConnection;
@@ -102,13 +104,10 @@ public class SpringCredentialRetryStoreIntegrationTest {
         String namespace = "test:spring-matcher:" + UUID.randomUUID();
         LettuceConnectionFactory first = connectionFactory(port);
         LettuceConnectionFactory second = connectionFactory(port);
-        try {
-            DefaultCredentialsMatcher a = new DefaultCredentialsMatcher();
-            a.setRetryLimit(3);
-            a.setCredentialRetryStore(redisStore(first, namespace, false));
-            DefaultCredentialsMatcher b = new DefaultCredentialsMatcher();
-            b.setRetryLimit(3);
-            b.setCredentialRetryStore(redisStore(second, namespace, true));
+        try (var firstContext = matcherContext(first, namespace, false);
+             var secondContext = matcherContext(second, namespace, true)) {
+            var a = firstContext.getBean(DefaultCredentialsMatcher.class);
+            var b = secondContext.getBean(DefaultCredentialsMatcher.class);
 
             var rejected = new UsernamePasswordToken("principal", "wrong");
             var account = new SimpleAuthenticationInfo("principal", "correct", "realm");
@@ -164,6 +163,22 @@ public class SpringCredentialRetryStoreIntegrationTest {
                 () -> shiro.getCredentialRetryStore("missing", SpringJCacheCredentialRetryStores::fromCache));
         assertThrows(IllegalArgumentException.class,
                 () -> shiro.getCredentialRetryStore(REGION, SpringJCacheCredentialRetryStores::fromCache));
+    }
+
+    private static AnnotationConfigApplicationContext matcherContext(
+            LettuceConnectionFactory factory, String namespace, boolean transactionAware) {
+        var context = new AnnotationConfigApplicationContext();
+        context.register(CredentialRetryStoreAutoConfiguration.class);
+        context.registerBean(CredentialRetryStoreAutoConfiguration.STORE_BEAN_PREFIX + REGION,
+                CredentialRetryStore.class, () -> redisStore(factory, namespace, transactionAware));
+        context.registerBean(DefaultCredentialsMatcher.class, () -> {
+            var matcher = new DefaultCredentialsMatcher();
+            matcher.setRetryLimit(3);
+            matcher.setCredentialsRetryCacheName(REGION);
+            return matcher;
+        });
+        context.refresh();
+        return context;
     }
 
     private static LettuceConnectionFactory connectionFactory(String port) {

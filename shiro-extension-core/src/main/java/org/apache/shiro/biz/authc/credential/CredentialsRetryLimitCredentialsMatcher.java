@@ -66,6 +66,13 @@ public class CredentialsRetryLimitCredentialsMatcher extends HashedCredentialsMa
         this.credentialRetryStore = store;
     }
 
+    /**
+     * @return the configured retry store, or null when using the Shiro retry cache
+     */
+    public CredentialRetryStore getCredentialRetryStore() {
+        return credentialRetryStore;
+    }
+
     @Override
     public boolean doCredentialsMatch(AuthenticationToken token, AuthenticationInfo info) {
         CredentialRetryStore store = credentialRetryStore;

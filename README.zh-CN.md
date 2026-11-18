@@ -184,7 +184,7 @@ realm.setCredentialsMatcher(new DefaultCredentialsMatcher());
 
 ## 7. Configuration
 
-这是库：没有配置属性与属性前缀。行为通过构造器/Bean 注入配置：
+通过构造器和 Bean 配置扩展行为。
 
 | 扩展点 | 配置方式 |
 | :--- | :--- |
@@ -193,6 +193,10 @@ realm.setCredentialsMatcher(new DefaultCredentialsMatcher());
 | Realm 缓存 | `setCacheManager(CaffeineCacheManager / GuavaCacheManager / SpringCacheManager / SessionCacheManager)` |
 | 过滤器（`HttpServletShiroFilter` 等） | Bean 属性与 Shiro 过滤器链定义 |
 | i18n 消息 | 随包 `org/apache/shiro/biz/messages*.properties`、`ShiroBizMessageSource` |
+
+### Spring Boot 共享重试计数
+
+如果匹配器的重试缓存名为 `login`，声明名为 `shiro.credential-retry.login` 的 `CredentialRetryStore` Bean。Spring Boot 会将它绑定到 `DefaultCredentialsMatcher` 和 `CredentialsRetryLimitCredentialsMatcher`，包括 Spring 管理的 Realm 内部创建的实例。手工指定的存储优先。缺少同名 Bean 时，匹配器沿用原 Shiro 缓存配置。共享重试窗口的应用实例应使用相同的缓存提供者、重试命名空间和主体键映射。
 
 ## 8. Core Usage / API
 

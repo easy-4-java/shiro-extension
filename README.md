@@ -184,7 +184,7 @@ realm.setCredentialsMatcher(new DefaultCredentialsMatcher());
 
 ## 7. Configuration
 
-This is a library: there are no configuration properties or prefixes. Behavior is configured through constructor/bean injection:
+Configure behavior through constructors and beans.
 
 | Extension point | Configurable via |
 | :--- | :--- |
@@ -193,6 +193,10 @@ This is a library: there are no configuration properties or prefixes. Behavior i
 | Realm cache | `setCacheManager(CaffeineCacheManager / GuavaCacheManager / SpringCacheManager / SessionCacheManager)` |
 | Filters (`HttpServletShiroFilter` and friends) | bean properties and the Shiro filter-chain definition |
 | i18n messages | bundled `org/apache/shiro/biz/messages*.properties`, `ShiroBizMessageSource` |
+
+### Shared credential retry state in Spring Boot
+
+For a Spring-managed retry matcher with cache name `login`, declare a provider-backed `CredentialRetryStore` bean named `shiro.credential-retry.login`. Spring Boot binds it to `DefaultCredentialsMatcher` and `CredentialsRetryLimitCredentialsMatcher`, including instances held by Spring-managed realms. An explicitly assigned store takes precedence. Matchers without a matching bean keep their Shiro cache configuration. Use the same provider, retry namespace and principal key mapping across the instances that share the window.
 
 ## 8. Core Usage / API
 
