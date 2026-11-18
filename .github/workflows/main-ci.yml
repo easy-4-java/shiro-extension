@@ -44,7 +44,7 @@ jobs:
           RETRY_REDIS_PORT: ${{ job.services.redis.ports[6379] }}
           RETRY_MEMCACHED_PORT: ${{ job.services.memcached.ports[11211] }}
         run: mvn -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" -Dshiro.redis.test.container="${RETRY_REDIS_CONTAINER}" -Dshiro.redis.test.port="${RETRY_REDIS_PORT}" -Dshiro.memcached.test.port="${RETRY_MEMCACHED_PORT}" clean verify
-      - name: Verify J2Cache retry migration on Redis Cluster
+      - name: Verify J2Cache and Redisson retry migration on Redis Cluster
         shell: bash
         run: |
           set -euo pipefail
@@ -73,15 +73,16 @@ jobs:
           cluster_nodes=$(IFS=,; printf '%s' "${nodes[*]}")
           mvn -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" \
             -pl shiro-extension-core -Dshiro.redis.test.cluster.nodes="$cluster_nodes" \
-            -Dtest=J2CacheRedisClusterMigrationTest test
+            '-Dtest=J2CacheRedisClusterMigrationTest,RedissonCredentialRetryStoreIntegrationTest#migratesTheLegacyMapEntryWithoutRefreshingItsIdleDeadline+keepsMapExpiryAndImportsPersistentZeroCounts' test
           python3 - <<'PYTHON'
           from pathlib import Path
           from xml.etree import ElementTree
 
           report = Path("shiro-extension-core/target/surefire-reports")
-          suite = ElementTree.parse(next(report.glob("TEST-*J2CacheRedisClusterMigrationTest.xml"))).getroot()
-          if tuple(suite.get(key) for key in ("tests", "failures", "errors", "skipped")) != ("2", "0", "0", "0"):
-              raise SystemExit("Expected both Redis Cluster migration tests to pass without skips")
+          for name in ("J2CacheRedisClusterMigrationTest", "RedissonCredentialRetryStoreIntegrationTest"):
+              suite = ElementTree.parse(next(report.glob(f"TEST-*{name}.xml"))).getroot()
+              if tuple(suite.get(key) for key in ("tests", "failures", "errors", "skipped")) != ("2", "0", "0", "0"):
+                  raise SystemExit(f"Expected two Redis Cluster migration tests without skips in {name}")
           PYTHON
       - name: Require coverage for modules with existing tests
         run: |
