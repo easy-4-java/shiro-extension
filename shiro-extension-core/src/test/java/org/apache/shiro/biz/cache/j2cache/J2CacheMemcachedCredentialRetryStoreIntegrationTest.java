@@ -1,6 +1,10 @@
 package org.apache.shiro.biz.cache.j2cache;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Instant;
@@ -25,6 +29,8 @@ import net.oschina.j2cache.util.SerializationUtils;
 import net.rubyeye.xmemcached.MemcachedClient;
 import net.rubyeye.xmemcached.XMemcachedClientBuilder;
 import net.rubyeye.xmemcached.command.BinaryCommandFactory;
+import net.rubyeye.xmemcached.transcoders.CachedData;
+import net.rubyeye.xmemcached.transcoders.SerializingTranscoder;
 import net.rubyeye.xmemcached.transcoders.StringTranscoder;
 import net.rubyeye.xmemcached.utils.AddrUtil;
 import org.apache.shiro.biz.authc.credential.CredentialRetryStore.Attempt;
@@ -128,11 +134,57 @@ public class J2CacheMemcachedCredentialRetryStoreIntegrationTest {
             String target = "shiro-retry:" + digest(namespace) + ":" + digest(principal);
             assertEquals(deadline + ":4:" + next.getWindowId(), firstClient.get(target, new StringTranscoder()));
             assertEquals(3, ((AtomicInteger) source.get(principal)).get());
-            assertTrue(store.migrateLegacyWindow("persistent", address));
+            try (Socket connection = new Socket()) {
+                connection.connect(address, 3000);
+                assertThrows(IllegalArgumentException.class,
+                        () -> store.migrateLegacyWindowFromMetaConnection("persistent", connection));
+                connection.setSoTimeout(3000);
+                assertTrue(store.migrateLegacyWindowFromMetaConnection("persistent", connection));
+                assertFalse(store.migrateLegacyWindowFromMetaConnection("persistent", connection));
+            }
             Attempt persistent = store.reserve("persistent");
             assertEquals(1, persistent.getCount());
             String persistentKey = "shiro-retry:" + digest(namespace) + ":" + digest("persistent");
             assertEquals("0:1:" + persistent.getWindowId(), firstClient.get(persistentKey, new StringTranscoder()));
+        }
+    }
+
+    @Test
+    public void importsThroughAnAuthenticatedMetaConnectionWithItsOriginalDeadline() throws Exception {
+        String authPort = System.getProperty("shiro.memcached.auth.test.port");
+        assumeTrue("Supply an isolated Memcached ASCII authentication port", Objects.nonNull(authPort));
+        SerializationUtils.init("java", new Properties());
+        J2CacheConfig config = config(true, "30s");
+        String principal = "authenticated-cutover";
+        int deadline = Math.toIntExact(Instant.now().getEpochSecond() + 15);
+        byte[] credentials = "fixture-user fixture-password".getBytes(StandardCharsets.US_ASCII);
+        CachedData seed = new SerializingTranscoder().encode(SerializationUtils.serialize(new AtomicInteger(3)));
+        byte[] payload = seed.getData();
+        try (Socket source = new Socket("127.0.0.1", Integer.parseInt(authPort));
+             CacheChannel channel = J2CacheTestChannel.open(config)) {
+            source.setSoTimeout(3000);
+            BufferedReader reply = new BufferedReader(new InputStreamReader(source.getInputStream(), StandardCharsets.US_ASCII));
+            OutputStream requests = source.getOutputStream();
+            requests.write(("set auth 0 0 " + credentials.length + "\r\n").getBytes(StandardCharsets.US_ASCII));
+            requests.write(credentials);
+            requests.write("\r\n".getBytes(StandardCharsets.US_ASCII));
+            requests.flush();
+            assertEquals("STORED", reply.readLine());
+            String set = "set " + REGION + ":" + principal + " " + seed.getFlag() + " " + deadline
+                    + " " + payload.length + "\r\n";
+            requests.write(set.getBytes(StandardCharsets.US_ASCII));
+            requests.write(payload);
+            requests.write("\r\n".getBytes(StandardCharsets.US_ASCII));
+            requests.flush();
+            assertEquals("STORED", reply.readLine());
+
+            J2CacheMemcachedCredentialRetryStore store = store(channel, config, firstClient);
+            assertTrue(store.migrateLegacyWindowFromMetaConnection(principal, source));
+            assertFalse(store.migrateLegacyWindowFromMetaConnection(principal, source));
+            Attempt next = store.reserve(principal);
+            assertEquals(4, next.getCount());
+            String target = "shiro-retry:" + digest(namespace) + ":" + digest(principal);
+            assertEquals(deadline + ":4:" + next.getWindowId(), firstClient.get(target, new StringTranscoder()));
         }
     }
 
