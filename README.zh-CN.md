@@ -204,6 +204,8 @@ realm.setCredentialsMatcher(new DefaultCredentialsMatcher());
 
 Hazelcast 5.2+ 与 3.12 的独立重试 IMap 沿用同样的切换顺序。所有集群成员须部署重试存储模块，并沿用原 IMap 和主体键。首次预留会原子转换旧计数，保留剩余 TTL，并按原策略刷新空闲时间。使用 3.12 适配器时需传入 IMap 配置的最大空闲时长。
 
+对于原本就接受两种值类型的 JCache 重试区域（例如值类型为 `Object`），停止旧客户端后沿用原区域和主体键。JCache 条目处理器会在同一次更新中转换已保存的计数并预留本次尝试。区域必须按值存储，并在访问和更新时保留创建时确定的截止时间。值类型仅允许 `AtomicInteger` 的区域需要单独切换，因为该区域无法存储新窗口格式。
+
 ## 8. Core Usage / API
 
 精选公开 API（类均位于 `org.apache.shiro.biz` 包下）：

@@ -2,6 +2,7 @@ package org.apache.shiro.biz.cache.jcache;
 
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import javax.cache.Cache;
 import javax.cache.configuration.CompleteConfiguration;
 import javax.cache.expiry.Duration;
@@ -9,6 +10,7 @@ import javax.cache.expiry.ExpiryPolicy;
 import javax.cache.processor.EntryProcessor;
 import javax.cache.processor.MutableEntry;
 import org.apache.shiro.biz.authc.credential.CredentialRetryStore;
+import org.apache.shiro.cache.CacheException;
 
 /**
  * Shared retry state in a dedicated JCache with a fixed creation expiry.
@@ -16,16 +18,24 @@ import org.apache.shiro.biz.authc.credential.CredentialRetryStore;
  */
 public final class JCacheCredentialRetryStore implements CredentialRetryStore {
 
-    private final Cache<Object, Attempt> cache;
+    private final Cache<Object, Object> cache;
 
     /**
      * @param cache shared retry cache using store-by-value and a nonzero creation expiry
      *              or eternal expiry. Its expiry policy must leave the deadline unchanged
      *              on both access and update. All cluster members must have this module.
+     *              To migrate legacy counters, reuse a region that accepts both value
+     *              types after stopping all legacy clients.
      */
-    public JCacheCredentialRetryStore(Cache<Object, Attempt> cache) {
-        this.cache = Objects.requireNonNull(cache, "cache");
-        CompleteConfiguration<?, ?> configuration = cache.getConfiguration(CompleteConfiguration.class);
+    @SuppressWarnings("unchecked")
+    public JCacheCredentialRetryStore(Cache<Object, ?> cache) {
+        CompleteConfiguration<?, ?> configuration =
+                Objects.requireNonNull(cache, "cache").getConfiguration(CompleteConfiguration.class);
+        if (!configuration.getValueType().isAssignableFrom(Attempt.class)) {
+            throw new IllegalArgumentException("JCache retry region must accept credential retry attempts");
+        }
+        // Provider configuration validates the values that the entry processor writes.
+        this.cache = (Cache<Object, Object>) cache;
         ExpiryPolicy policy = configuration.getExpiryPolicyFactory().create();
         Duration creation = policy.getExpiryForCreation();
         if (!configuration.isStoreByValue() || Objects.isNull(creation) || creation.isZero()
@@ -44,18 +54,26 @@ public final class JCacheCredentialRetryStore implements CredentialRetryStore {
         cache.invoke(principal, Clear.INSTANCE, Objects.requireNonNull(windowId, "windowId"));
     }
 
-    private enum Reserve implements EntryProcessor<Object, Attempt, Attempt> {
+    private enum Reserve implements EntryProcessor<Object, Object, Attempt> {
         INSTANCE;
 
         @Override
-        public Attempt process(MutableEntry<Object, Attempt> entry, Object... arguments) {
-            Attempt current = entry.getValue();
+        public Attempt process(MutableEntry<Object, Object> entry, Object... arguments) {
+            Object value = entry.getValue();
             Attempt next;
-            if (Objects.isNull(current)) {
+            if (Objects.isNull(value)) {
                 next = new Attempt((String) arguments[0], 1);
-            } else if (current.getCount() == Integer.MAX_VALUE) {
-                return current;
+            } else if (value instanceof AtomicInteger) {
+                int count = ((AtomicInteger) value).get();
+                if (count < 0) {
+                    throw new CacheException("Legacy credential retry count is negative");
+                }
+                next = new Attempt((String) arguments[0], count == Integer.MAX_VALUE ? count : count + 1);
             } else {
+                Attempt current = (Attempt) value;
+                if (current.getCount() == Integer.MAX_VALUE) {
+                    return current;
+                }
                 next = new Attempt(current.getWindowId(), current.getCount() + 1);
             }
             entry.setValue(next);
@@ -63,13 +81,13 @@ public final class JCacheCredentialRetryStore implements CredentialRetryStore {
         }
     }
 
-    private enum Clear implements EntryProcessor<Object, Attempt, Void> {
+    private enum Clear implements EntryProcessor<Object, Object, Void> {
         INSTANCE;
 
         @Override
-        public Void process(MutableEntry<Object, Attempt> entry, Object... arguments) {
-            Attempt current = entry.getValue();
-            if (Objects.nonNull(current) && current.getWindowId().equals(arguments[0])) {
+        public Void process(MutableEntry<Object, Object> entry, Object... arguments) {
+            Object value = entry.getValue();
+            if (value instanceof Attempt && ((Attempt) value).getWindowId().equals(arguments[0])) {
                 entry.remove();
             }
             return null;
