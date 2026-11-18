@@ -14,6 +14,7 @@ import org.apache.shiro.biz.cache.redis.RedisCredentialRetryStore;
 public final class J2CacheLettuceCredentialRetryStore implements CredentialRetryStore {
 
     private final RedisCredentialRetryStore delegate;
+    private final J2CacheRedisLegacyWindows legacy;
 
     /**
      * @param channel channel using J2Cache's Lettuce L2 provider
@@ -30,10 +31,11 @@ public final class J2CacheLettuceCredentialRetryStore implements CredentialRetry
             throw new IllegalArgumentException("J2Cache retry state requires a Lettuce L2 provider");
         }
         Objects.requireNonNull(commands, "commands");
-        this.delegate = new RedisCredentialRetryStore(
-                (script, keys, args) -> commands.eval(script, ScriptOutputType.VALUE,
-                        keys.toArray(String[]::new), args.toArray(String[]::new)),
+        RedisCredentialRetryStore.ScriptExecutor scripts = (script, keys, args) -> commands.eval(
+                script, ScriptOutputType.VALUE, keys.toArray(String[]::new), args.toArray(String[]::new));
+        this.delegate = new RedisCredentialRetryStore(scripts,
                 namespace, principalKey, J2CacheRetryExpiry.resolve(channel, config, region, "hash"));
+        this.legacy = new J2CacheRedisLegacyWindows(channel, config, region, false, scripts);
     }
 
     @Override
@@ -44,5 +46,15 @@ public final class J2CacheLettuceCredentialRetryStore implements CredentialRetry
     @Override
     public void clearIfCurrent(Object principal, String windowId) {
         delegate.clearIfCurrent(principal, windowId);
+    }
+
+    /**
+     * Copies a persisted L2 counter into the dedicated retry namespace during an exclusive cutover.
+     *
+     * @param principal original string principal key in the J2Cache retry region
+     * @return true when a live legacy window was imported into an empty destination
+     */
+    public boolean migrateLegacyWindow(String principal) {
+        return legacy.migrate(principal, delegate);
     }
 }
