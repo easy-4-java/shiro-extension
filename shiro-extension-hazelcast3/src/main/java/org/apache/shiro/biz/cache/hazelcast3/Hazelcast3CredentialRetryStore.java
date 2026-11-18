@@ -7,8 +7,10 @@ import java.io.Serializable;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import org.apache.shiro.biz.authc.credential.CredentialRetryStore;
+import org.apache.shiro.cache.CacheException;
 
 /**
  * Shared retry state in a dedicated Hazelcast 3.12 IMap. The map's key lock
@@ -21,13 +23,14 @@ public final class Hazelcast3CredentialRetryStore<K> implements CredentialRetryS
     private static final long UNSET_DEADLINE = 0;
     private static final long NO_DEADLINE = Long.MAX_VALUE;
 
-    private final IMap<K, Window> map;
+    private final IMap<K, Object> map;
     private final long maxIdleMillis;
     private final Function<Object, K> principalKey;
 
     /**
      * @param hazelcast member or thin client connected to the retry map's cluster
-     * @param mapName dedicated retry map managed exclusively by this store, with this module on all members
+     * @param mapName dedicated retry map. Legacy retry maps can be reused after all legacy clients stop.
+     *                This module must be available on all members.
      * @param maxIdleSeconds the map's configured max idle. The 3.12 client wire format omits this setting
      * @param principalKey stable principal encoding shared by application instances
      */
@@ -46,7 +49,7 @@ public final class Hazelcast3CredentialRetryStore<K> implements CredentialRetryS
         K key = key(principal);
         map.lock(key);
         try {
-            EntryView<K, Window> entry = map.getEntryView(key);
+            EntryView<K, Object> entry = map.getEntryView(key);
             long now = System.currentTimeMillis();
             if (Objects.isNull(entry)) {
                 return startWindow(key);
@@ -58,9 +61,19 @@ public final class Hazelcast3CredentialRetryStore<K> implements CredentialRetryS
                 return startWindow(key);
             }
 
-            Attempt current = entry.getValue().attempt;
-            Attempt next = current.getCount() == Integer.MAX_VALUE
-                    ? current : new Attempt(current.getWindowId(), current.getCount() + 1);
+            Object value = entry.getValue();
+            Attempt next;
+            if (value instanceof AtomicInteger) {
+                int count = ((AtomicInteger) value).get();
+                if (count < 0) {
+                    throw new CacheException("Legacy credential retry count is negative");
+                }
+                next = new Attempt(UUID.randomUUID().toString(), count == Integer.MAX_VALUE ? count : count + 1);
+            } else {
+                Attempt current = ((Window) value).attempt;
+                next = current.getCount() == Integer.MAX_VALUE
+                        ? current : new Attempt(current.getWindowId(), current.getCount() + 1);
+            }
             // Hazelcast 3.12 stores creation, update and TTL metadata at whole-second precision.
             long remainingSeconds = deadline == NO_DEADLINE ? 0
                     : TimeUnit.MILLISECONDS.toSeconds(deadline) - TimeUnit.MILLISECONDS.toSeconds(now);
@@ -77,9 +90,12 @@ public final class Hazelcast3CredentialRetryStore<K> implements CredentialRetryS
         Objects.requireNonNull(windowId, "windowId");
         map.lock(key);
         try {
-            EntryView<K, Window> entry = map.getEntryView(key);
-            if (Objects.nonNull(entry) && windowId.equals(entry.getValue().attempt.getWindowId())) {
-                map.delete(key);
+            EntryView<K, Object> entry = map.getEntryView(key);
+            if (Objects.nonNull(entry)) {
+                Object value = entry.getValue();
+                if (value instanceof Window && windowId.equals(((Window) value).attempt.getWindowId())) {
+                    map.delete(key);
+                }
             }
         } finally {
             map.unlock(key);
@@ -96,19 +112,24 @@ public final class Hazelcast3CredentialRetryStore<K> implements CredentialRetryS
         return Objects.requireNonNull(principalKey.apply(principal), "encoded principal");
     }
 
-    private boolean expired(EntryView<K, Window> entry, long deadline, long now) {
+    private boolean expired(EntryView<K, Object> entry, long deadline, long now) {
         long lastActivity = Math.max(entry.getCreationTime(), entry.getLastAccessTime());
         return deadline <= now || (maxIdleMillis > 0 && now - lastActivity >= maxIdleMillis);
     }
 
-    private static long ttlDeadline(EntryView<?, Window> entry) {
-        long saved = entry.getValue().ttlDeadline;
-        if (saved != UNSET_DEADLINE) {
-            return saved;
+    private static long ttlDeadline(EntryView<?, Object> entry) {
+        Object value = entry.getValue();
+        if (value instanceof Window) {
+            long saved = ((Window) value).ttlDeadline;
+            if (saved != UNSET_DEADLINE) {
+                return saved;
+            }
         }
 
         long ttl = entry.getTtl();
-        return ttl <= 0 || ttl == NO_DEADLINE ? NO_DEADLINE : entry.getCreationTime() + ttl;
+        // Hazelcast 3.12 measures a written entry's TTL from its most recent update.
+        long ttlStart = Math.max(entry.getCreationTime(), entry.getLastUpdateTime());
+        return ttl <= 0 || ttl > NO_DEADLINE - ttlStart ? NO_DEADLINE : ttlStart + ttl;
     }
 
     private static final class Window implements Serializable {
