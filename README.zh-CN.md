@@ -201,6 +201,8 @@ realm.setCredentialsMatcher(new DefaultCredentialsMatcher());
 
 对于现有 Ehcache 2 重试缓存，先停止访问该区域的全部旧版客户端，再启用共享重试存储，并沿用原区域及主体键。首次预留在键锁内转换已保存的旧计数，计入本次尝试，并保留原 TTL 截止时间和配置的空闲过期策略。集群部署使用强一致性区域。
 
+Hazelcast 5.2+ 与 3.12 的独立重试 IMap 沿用同样的切换顺序。所有集群成员须部署重试存储模块，并沿用原 IMap 和主体键。首次预留会原子转换旧计数，保留剩余 TTL，并按原策略刷新空闲时间。使用 3.12 适配器时需传入 IMap 配置的最大空闲时长。
+
 ## 8. Core Usage / API
 
 精选公开 API（类均位于 `org.apache.shiro.biz` 包下）：
