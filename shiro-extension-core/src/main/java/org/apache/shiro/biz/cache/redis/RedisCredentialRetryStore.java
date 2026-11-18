@@ -104,6 +104,9 @@ public final class RedisCredentialRetryStore implements CredentialRetryStore {
             "  end",
             "end",
             "redis.call('HSET', key, 'window', ARGV[1], 'count', ARGV[2])",
+            "if ARGV[4] ~= '0' then",
+            "  redis.call('HSET', key, 'idleMillis', ARGV[4], 'ttlDeadline', ARGV[5])",
+            "end",
             "if ARGV[3] ~= '0' then",
             "  redis.call('PEXPIREAT', key, ARGV[3])",
             "end",
@@ -227,11 +230,33 @@ public final class RedisCredentialRetryStore implements CredentialRetryStore {
      * @return true when an unexpired counter was imported
      */
     public boolean importFixedWindow(Object principal, int count, long deadlineMillis) {
-        if (count < 0 || deadlineMillis < 0) {
-            throw new IllegalArgumentException("Legacy count and deadline must be nonnegative");
+        return importWindow(principal, count, deadlineMillis, 0, Duration.ZERO);
+    }
+
+    /**
+     * Imports a legacy counter and its original lifetime and idle metadata into an empty key.
+     * Run this only during an exclusive cutover.
+     *
+     * @param principal principal to migrate
+     * @param count persisted count before the next reservation
+     * @param ttlDeadline absolute lifetime deadline in epoch milliseconds, or zero without a lifetime limit
+     * @param idleDeadline absolute idle deadline in epoch milliseconds, or zero without an idle timeout
+     * @param maxIdle existing idle period
+     * @return true when an unexpired counter was imported
+     */
+    public boolean importWindow(Object principal, int count, long ttlDeadline, long idleDeadline, Duration maxIdle) {
+        long idleMillis = toMillis(maxIdle, "maxIdle");
+        if (count < 0 || ttlDeadline < 0 || idleDeadline < 0
+                || (idleMillis == 0) != (idleDeadline == 0) || idleMillis > (1L << 52)) {
+            throw new IllegalArgumentException("Invalid legacy retry count or expiry");
+        }
+        long effectiveDeadline = ttlDeadline;
+        if (idleDeadline > 0 && (effectiveDeadline == 0 || idleDeadline < effectiveDeadline)) {
+            effectiveDeadline = idleDeadline;
         }
         return "1".equals(executor.eval(IMPORT_LEGACY, Collections.singletonList(key(principal)),
-                Arrays.asList(UUID.randomUUID().toString(), Integer.toString(count), Long.toString(deadlineMillis))));
+                Arrays.asList(UUID.randomUUID().toString(), Integer.toString(count), Long.toString(effectiveDeadline),
+                        Long.toString(idleMillis), Long.toString(ttlDeadline))));
     }
 
     private String key(Object principal) {
