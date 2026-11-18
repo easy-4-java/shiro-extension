@@ -1,5 +1,7 @@
 package org.apache.shiro.biz.cache.j2cache;
 
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.UUID;
@@ -39,16 +41,26 @@ public class J2CacheRedisCredentialRetryStoreIntegrationTest {
     @Test
     public void migratesBothL2LayoutsUsingPersistedCountsAndDeadlines() throws Exception {
         SerializationUtils.init("java", new Properties());
+        String expectedCharset = System.getProperty("shiro.redis.test.expectedCharset");
+        if (Objects.nonNull(expectedCharset)) {
+            assertEquals(Charset.forName(expectedCharset), Charset.defaultCharset());
+        }
         try (Jedis redis = new Jedis("127.0.0.1", port)) {
             for (String storage : new String[] {"generic", "hash"}) {
                 J2CacheConfig config = config(true, storage);
+                String legacyNamespace = namespace + ":l\u00e9gacy";
+                config.getL2CacheProperties().setProperty("namespace", legacyNamespace);
                 try (CacheChannel channel = J2CacheTestChannel.open(config)) {
                     channel.set(REGION, "principal", new AtomicInteger(1));
                     Level2Cache source = (Level2Cache) channel.getL2Provider().buildCache(REGION, null);
                     source.put("principal", new AtomicInteger(3), 8L);
                     assertEquals(1, ((AtomicInteger) channel.get(REGION, "principal").getValue()).get());
-                    String legacyKey = namespace + ":legacy:" + REGION + ("hash".equals(storage) ? "" : ":principal");
-                    long deadline = (Long) redis.eval("return redis.call('PEXPIRETIME', KEYS[1])", 1, legacyKey);
+                    boolean hash = "hash".equals(storage);
+                    String legacyKey = legacyNamespace + ":" + REGION + (hash ? "" : ":principal");
+                    byte[] keyBytes = legacyKey.getBytes(hash ? Charset.defaultCharset() : StandardCharsets.UTF_8);
+                    assertEquals(Long.valueOf(1), redis.pexpire(keyBytes, 8000L));
+                    long deadline = (Long) redis.eval(
+                            "return redis.call('PEXPIRETIME', KEYS[1])".getBytes(StandardCharsets.US_ASCII), 1, keyBytes);
                     J2CacheRedisCredentialRetryStore store = store(channel, config);
                     assertTrue(store.migrateLegacyWindow("principal"));
                     assertFalse(store.migrateLegacyWindow("principal"));
