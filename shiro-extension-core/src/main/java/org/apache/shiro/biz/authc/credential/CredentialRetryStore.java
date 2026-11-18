@@ -1,5 +1,6 @@
 package org.apache.shiro.biz.authc.credential;
 
+import java.io.Serializable;
 import java.util.Objects;
 import lombok.Getter;
 
@@ -29,7 +30,9 @@ public interface CredentialRetryStore {
 
     /** Data returned by a successful reservation. */
     @Getter
-    final class Attempt {
+    final class Attempt implements Serializable {
+
+        private static final long serialVersionUID = 1L;
 
         private final String windowId;
         private final int count;
