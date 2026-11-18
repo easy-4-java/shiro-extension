@@ -43,6 +43,7 @@
         <maven.compiler.release>${java.version}</maven.compiler.release>
         <maven.version>4.0.0-rc-5</maven.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <shiro.test.fileEncoding>UTF-8</shiro.test.fileEncoding>
         <!-- Dependency versions -->
         <assertj.version>3.27.3</assertj.version>
         <caffeine.version>2.9.3</caffeine.version>
@@ -363,7 +364,7 @@
                     <configuration>
                         <skip>false</skip>
                         <skipTests>false</skipTests>
-                        <argLine>@{jacocoArgLine} -Xmx1024m -Dfile.encoding=UTF-8</argLine>
+                        <argLine>@{jacocoArgLine} -Xmx1024m -Dfile.encoding=${shiro.test.fileEncoding}</argLine>
                         <additionalClasspathElements>
                             <additionalClasspathElement>${basedir}/target/test-classes</additionalClasspathElement>
                         </additionalClasspathElements>

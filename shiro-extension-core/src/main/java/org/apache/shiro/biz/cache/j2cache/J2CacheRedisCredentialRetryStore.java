@@ -1,6 +1,6 @@
 package org.apache.shiro.biz.cache.j2cache;
 
-import java.util.List;
+import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import java.util.function.Function;
 import net.oschina.j2cache.CacheChannel;
@@ -22,6 +22,9 @@ import redis.clients.jedis.ShardedJedis;
  */
 public final class J2CacheRedisCredentialRetryStore implements CredentialRetryStore {
 
+    private static final byte[] DEADLINE_SCRIPT =
+            J2CacheRedisLegacyWindows.DEADLINE_SCRIPT.getBytes(StandardCharsets.US_ASCII);
+
     private final RedisCredentialRetryStore delegate;
     private final J2CacheRedisLegacyWindows legacy;
 
@@ -39,10 +42,12 @@ public final class J2CacheRedisCredentialRetryStore implements CredentialRetrySt
             throw new IllegalArgumentException("J2Cache Cluster mode requires its native JedisCluster script client");
         }
         RedisClient client = provider.getRedisClient();
-        RedisCredentialRetryStore.ScriptExecutor scripts = (script, keys, args) -> eval(client, script, keys, args);
+        RedisCredentialRetryStore.ScriptExecutor scripts = (script, keys, args) ->
+                onShard(client, keys.get(0).getBytes(StandardCharsets.UTF_8), jedis -> (String) jedis.eval(script, keys, args));
         this.delegate = new RedisCredentialRetryStore(scripts,
                 namespace, principalKey, J2CacheRetryExpiry.resolve(channel, config, region, "generic"));
-        this.legacy = new J2CacheRedisLegacyWindows(channel, config, region, true, scripts);
+        this.legacy = new J2CacheRedisLegacyWindows(channel, config, region, true,
+                key -> onShard(client, key, jedis -> (Long) jedis.eval(DEADLINE_SCRIPT, 1, key)));
     }
 
     /**
@@ -61,7 +66,8 @@ public final class J2CacheRedisCredentialRetryStore implements CredentialRetrySt
         RedisCredentialRetryStore.ScriptExecutor scripts = (script, keys, args) -> (String) cluster.eval(script, keys, args);
         this.delegate = new RedisCredentialRetryStore(scripts,
                 namespace, principalKey, J2CacheRetryExpiry.resolve(channel, config, region, "generic"));
-        this.legacy = new J2CacheRedisLegacyWindows(channel, config, region, true, scripts);
+        this.legacy = new J2CacheRedisLegacyWindows(channel, config, region, true,
+                key -> (Long) cluster.eval(DEADLINE_SCRIPT, 1, key));
     }
 
     @Override
@@ -92,14 +98,14 @@ public final class J2CacheRedisCredentialRetryStore implements CredentialRetrySt
         throw new IllegalArgumentException("J2Cache retry state requires a writable Jedis provider");
     }
 
-    private static String eval(RedisClient client, String script, List<String> keys, List<String> args) {
+    private static <T> T onShard(RedisClient client, byte[] key, Function<Jedis, T> operation) {
         try {
             BinaryJedisCommands connection = client.get();
             if (connection instanceof Jedis jedis) {
-                return (String) jedis.eval(script, keys, args);
+                return operation.apply(jedis);
             }
             if (connection instanceof ShardedJedis sharded) {
-                return (String) sharded.getShard(keys.get(0)).eval(script, keys, args);
+                return operation.apply(sharded.getShard(key));
             }
             throw new CacheException("The J2Cache Redis connection does not expose script execution");
         } finally {
