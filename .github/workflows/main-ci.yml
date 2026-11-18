@@ -13,6 +13,8 @@ jobs:
     services:
       redis:
         image: redis:8.4.0
+        ports:
+          - 6379/tcp
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 5s
@@ -35,7 +37,8 @@ jobs:
       - name: Verify Shiro extension
         env:
           RETRY_REDIS_CONTAINER: ${{ job.services.redis.id }}
-        run: mvn -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" -Dshiro.redis.test.container="${RETRY_REDIS_CONTAINER}" clean verify
+          RETRY_REDIS_PORT: ${{ job.services.redis.ports[6379] }}
+        run: mvn -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" -Dshiro.redis.test.container="${RETRY_REDIS_CONTAINER}" -Dshiro.redisson.test.port="${RETRY_REDIS_PORT}" clean verify
       - name: Require coverage for modules with existing tests
         run: |
           test -s .ci-dependencies/jwt-issuer/jwt-issuer-with-jjwt/target/jacoco.exec

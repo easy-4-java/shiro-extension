@@ -14,17 +14,46 @@ import org.apache.shiro.biz.authc.credential.CredentialRetryStore;
 public final class RedisCredentialRetryStore implements CredentialRetryStore {
 
     private static final String RESERVE = """
-            local window = redis.call('HGET', KEYS[1], 'window')
-            if not window then
-              redis.call('HSET', KEYS[1], 'window', ARGV[1], 'count', 1)
-              if ARGV[2] ~= '0' then
-                redis.call('PEXPIRE', KEYS[1], ARGV[2])
-              end
-              return ARGV[1] .. ':1'
+            local key = KEYS[1]
+            local window = redis.call('HGET', key, 'window')
+            local idle = ARGV[3]
+            if window then
+              idle = redis.call('HGET', key, 'idleMillis')
             end
-            local count = redis.call('HGET', KEYS[1], 'count')
-            if tonumber(count) < 2147483647 then
-              count = redis.call('HINCRBY', KEYS[1], 'count', 1)
+            local idleDeadline
+            local ttlDeadline = '0'
+            if idle and idle ~= '0' then
+              redis.replicate_commands()
+              local time = redis.call('TIME')
+              local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+              idleDeadline = now + tonumber(idle)
+              if window then
+                ttlDeadline = redis.call('HGET', key, 'ttlDeadline')
+              elseif ARGV[2] ~= '0' then
+                ttlDeadline = string.format('%.0f', now + tonumber(ARGV[2]))
+              end
+              if ttlDeadline ~= '0' then
+                idleDeadline = math.min(idleDeadline, tonumber(ttlDeadline))
+              end
+            end
+            local count
+            if not window then
+              window = ARGV[1]
+              count = 1
+              redis.call('HSET', key, 'window', window, 'count', count)
+              if idleDeadline then
+                redis.call('HSET', key, 'idleMillis', idle, 'ttlDeadline', ttlDeadline)
+              elseif ARGV[2] ~= '0' then
+                redis.call('PEXPIRE', key, ARGV[2])
+              end
+            else
+              count = redis.call('HGET', key, 'count')
+              if tonumber(count) < 2147483647 then
+                count = redis.call('HINCRBY', key, 'count', 1)
+              end
+            end
+            if idleDeadline then
+              redis.call('PEXPIREAT', key, string.format('%.0f', idleDeadline))
             end
             return window .. ':' .. count
             """;
@@ -40,6 +69,7 @@ public final class RedisCredentialRetryStore implements CredentialRetryStore {
     private final String namespace;
     private final Function<Object, String> principalKey;
     private final String expiryMillis;
+    private final String idleMillis;
 
     /**
      * @param executor Redis client operation for scripts returning a UTF-8 bulk string
@@ -49,21 +79,47 @@ public final class RedisCredentialRetryStore implements CredentialRetryStore {
      */
     public RedisCredentialRetryStore(ScriptExecutor executor, String namespace,
                                     Function<Object, String> principalKey, Duration expiry) {
+        this(executor, namespace, principalKey, expiry, Duration.ZERO);
+    }
+
+    /**
+     * @param executor Redis client operation for scripts returning a UTF-8 bulk string
+     * @param namespace dedicated retry hash namespace shared by all instances
+     * @param principalKey stable principal encoding shared by all instances
+     * @param expiry maximum lifetime of a new window, or zero for no lifetime limit
+     * @param maxIdle idle period refreshed by a reservation, or zero for no idle limit
+     */
+    public RedisCredentialRetryStore(ScriptExecutor executor, String namespace,
+                                    Function<Object, String> principalKey, Duration expiry, Duration maxIdle) {
         this.executor = Objects.requireNonNull(executor, "executor");
         this.namespace = Objects.requireNonNull(namespace, "namespace");
         this.principalKey = Objects.requireNonNull(principalKey, "principalKey");
-        Objects.requireNonNull(expiry, "expiry");
-        long millis = expiry.toMillis();
-        if (namespace.isBlank() || expiry.isNegative() || (millis == 0 && !expiry.isZero())) {
-            throw new IllegalArgumentException("Retry state requires a namespace and a nonnegative millisecond expiry");
+        if (namespace.isBlank()) {
+            throw new IllegalArgumentException("Retry state requires a namespace");
         }
-        this.expiryMillis = Long.toString(millis);
+        long ttl = toMillis(expiry, "expiry");
+        long idle = toMillis(maxIdle, "maxIdle");
+        // Allow room for the current epoch time while keeping Lua arithmetic exact.
+        if (idle > 0 && (ttl > (1L << 52) || idle > (1L << 52))) {
+            throw new IllegalArgumentException("Retry duration is too large for an idle expiry policy");
+        }
+        this.expiryMillis = Long.toString(ttl);
+        this.idleMillis = Long.toString(idle);
+    }
+
+    private static long toMillis(Duration duration, String name) {
+        Objects.requireNonNull(duration, name);
+        long millis = duration.toMillis();
+        if (duration.isNegative() || (millis == 0 && !duration.isZero())) {
+            throw new IllegalArgumentException(name + " must be zero or a positive millisecond duration");
+        }
+        return millis;
     }
 
     @Override
     public Attempt reserve(Object principal) {
         String result = executor.eval(RESERVE, List.of(key(principal)),
-                List.of(UUID.randomUUID().toString(), expiryMillis));
+                List.of(UUID.randomUUID().toString(), expiryMillis, idleMillis));
         int separator = result.lastIndexOf(':');
         if (separator < 1) {
             throw new IllegalStateException("Unexpected Redis retry reservation response");
