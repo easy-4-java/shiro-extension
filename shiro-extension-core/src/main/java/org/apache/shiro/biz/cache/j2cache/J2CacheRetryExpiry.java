@@ -17,13 +17,16 @@ final class J2CacheRetryExpiry {
             return Duration.ZERO;
         }
 
+        return Duration.ofSeconds(Math.max(0L, regionSeconds(channel, region)));
+    }
+
+    static long regionSeconds(CacheChannel channel, String region) {
         // Resolve the region through the channel so defaults and its existing listener are applied.
         channel.check(region, "__shiro_retry_region_probe__" + UUID.randomUUID());
-        long seconds = channel.regions().stream()
+        return channel.regions().stream()
                 .filter(candidate -> region.equals(candidate.getName()))
                 .findFirst()
                 .orElseThrow(() -> new IllegalArgumentException("J2Cache retry region TTL is unavailable"))
                 .getTtl();
-        return Duration.ofSeconds(Math.max(0L, seconds));
     }
 }
