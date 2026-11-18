@@ -643,6 +643,7 @@
 
     <modules>
         <module>shiro-extension-core</module>
+        <module>shiro-extension-hazelcast3</module>
         <module>shiro-extension-spring</module>
     </modules>
 </project>
