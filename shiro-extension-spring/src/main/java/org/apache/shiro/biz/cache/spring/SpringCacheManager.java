@@ -15,12 +15,15 @@
  */
 package org.apache.shiro.biz.cache.spring;
 
+import org.apache.shiro.biz.authc.credential.CredentialRetryStore;
 import org.apache.shiro.cache.Cache;
 import org.apache.shiro.cache.CacheException;
 import org.apache.shiro.cache.CacheManager;
 
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.function.Function;
 
 /**
  * Spring CacheManager Wrapper
@@ -37,6 +40,23 @@ public class SpringCacheManager implements CacheManager {
 		this.delegator = cacheManager;
 	}
 	
+    /**
+     * Binds a retry store to the named cache through its provider-specific factory.
+     *
+     * @param cacheName the Spring cache region whose retry policy is used
+     * @param providerFactory factory that opens an atomic retry store for the cache provider
+     * @return the provider-backed retry store
+     */
+    public CredentialRetryStore getCredentialRetryStore(
+            String cacheName, Function<? super org.springframework.cache.Cache, ? extends CredentialRetryStore> providerFactory) {
+        Objects.requireNonNull(providerFactory, "providerFactory");
+        org.springframework.cache.Cache springCache = delegator.getCache(cacheName);
+        if (Objects.isNull(springCache)) {
+            throw new CacheException("Spring retry cache is unavailable: " + cacheName);
+        }
+        return Objects.requireNonNull(providerFactory.apply(springCache), "providerStore");
+    }
+
 	@Override
 	public <K, V> Cache<K, V> getCache(String cacheName) throws CacheException {
 		SpringCache<K,V> cache = this.CACHES.get(cacheName);

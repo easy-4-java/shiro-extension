@@ -26,9 +26,9 @@
 
 `shiro-extension` 是 Apache Shiro 的通用扩展层。core 模块提供无 Spring 依赖的认证、授权、缓存、会话、Servlet 与工具能力；spring 模块提供处理器、过滤器、消息源、调度和 Shiro-Spring 集成。
 
-**不是什么**
+**打包结构**
 
-- 它不是应用框架或 Spring Boot Starter——它是由两个模块组成的 Shiro 扩展库。
+- 扩展库包含核心模块、Spring 集成模块和可选缓存适配模块。
 - 它不会将 Shiro 打成 shaded jar 随包发布；`org.apache.shiro:shiro-spring` 是普通依赖。
 
 **典型场景**
@@ -104,12 +104,14 @@
  Subject（认证结果）--> 处理器 --> AuthcResponse（JSON）
 ```
 
-本项目是包含两个模块的 Maven 父工程：
+Maven 父工程构建以下模块。
 
 | 模块 | 职责 |
 | :--- | :--- |
 | `shiro-extension-core` | 不依赖 Spring 的 Shiro 认证、授权、缓存、会话、Servlet 与工具扩展 |
 | `shiro-extension-spring` | Spring 处理器、过滤器、消息源、调度和 Shiro-Spring 集成；依赖 core |
+| `shiro-extension-hazelcast3` | 可选的 Hazelcast 3.12 IMap 重试计数适配 |
+| `shiro-extension-spring-redis4` | 可选的 Spring Data Redis 4 重试计数适配 |
 
 | 包 | 职责 |
 | :--- | :--- |
@@ -184,7 +186,7 @@ realm.setCredentialsMatcher(new DefaultCredentialsMatcher());
 
 ## 7. Configuration
 
-这是库：没有配置属性与属性前缀。行为通过构造器/Bean 注入配置：
+通过构造器和 Bean 配置扩展行为。
 
 | 扩展点 | 配置方式 |
 | :--- | :--- |
@@ -193,6 +195,10 @@ realm.setCredentialsMatcher(new DefaultCredentialsMatcher());
 | Realm 缓存 | `setCacheManager(CaffeineCacheManager / GuavaCacheManager / SpringCacheManager / SessionCacheManager)` |
 | 过滤器（`HttpServletShiroFilter` 等） | Bean 属性与 Shiro 过滤器链定义 |
 | i18n 消息 | 随包 `org/apache/shiro/biz/messages*.properties`、`ShiroBizMessageSource` |
+
+### Spring Boot 共享重试计数
+
+如果匹配器的重试缓存名为 `login`，声明名为 `shiro.credential-retry.login` 的 `CredentialRetryStore` Bean。Spring Boot 会将它绑定到 `DefaultCredentialsMatcher` 和 `CredentialsRetryLimitCredentialsMatcher`，包括 Spring 管理的 Realm 内部创建的实例。手工指定的存储优先。缺少同名 Bean 时，匹配器沿用原 Shiro 缓存配置。共享重试窗口的应用实例应使用相同的缓存提供者、重试命名空间和主体键映射。
 
 ## 8. Core Usage / API
 

@@ -10,7 +10,7 @@ name: CI
 
 on:
   push:
-    branches: [feature/3.0.x]
+    branches: [feature/3.0.x, feature/REQ-20261118-wandl-shiro-auth-3x]
   pull_request:
     branches: [feature/3.0.x]
   workflow_dispatch:
@@ -23,6 +23,20 @@ jobs:
     name: JDK 21 Build & Verify
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      redis:
+        image: redis:8.4.0
+        ports:
+          - 6379/tcp
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+      memcached:
+        image: memcached:1.6.45-alpine
+        ports:
+          - 11211/tcp
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
@@ -34,40 +48,46 @@ jobs:
           java-version: '21'
           cache: maven
 
-      - name: Install Easy4J snapshot dependencies
-        env:
-          EASY4J_BRANCH: ${{ github.base_ref || github.ref_name }}
-          EASY4J_DEPENDENCIES: "jwt-issuer"
-        run: |
-          set -euo pipefail
-          dependency_root="${RUNNER_TEMP}/easy4j-dependencies"
-          mkdir -p "${dependency_root}"
-          for dependency in ${EASY4J_DEPENDENCIES}; do
-            git clone --depth 1 --branch "${EASY4J_BRANCH}" \
-              "https://github.com/easy-4-java/${dependency}.git" \
-              "${dependency_root}/${dependency}"
-            for attempt in 1 2 3; do
-              if sh ./mvnw -B --no-transfer-progress \
-                -f "${dependency_root}/${dependency}/pom.xml" \
-                -DskipTests -Djacoco.skip=true -Dgpg.skip=true install; then
-                break
-              fi
-              if [[ "${attempt}" -eq 3 ]]; then
-                exit 1
-              fi
-              sleep "$((attempt * 10))"
-            done
-          done
+      - name: Checkout pinned JWT issuer source
+        uses: actions/checkout@v7
+        with:
+          repository: easy-4-java/jwt-issuer
+          ref: c5873ed3d450f1900dcbf2a4fc2e590077d233f7
+          path: .ci-dependencies/jwt-issuer
+
+      - name: Install JWT issuer
+        run: >
+          sh ./mvnw -B -ntp -s .github/maven-central-settings.xml
+          -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2"
+          -f .ci-dependencies/jwt-issuer/pom.xml
+          -DskipTests -Djacoco.skip=true -Dgpg.skip=true install
 
       - name: Build and verify with JaCoCo coverage gate
-        run: sh ./mvnw -B --no-transfer-progress clean verify
+        env:
+          RETRY_REDIS_CONTAINER: ${{ job.services.redis.id }}
+          RETRY_REDIS_PORT: ${{ job.services.redis.ports['6379'] }}
+          RETRY_MEMCACHED_PORT: ${{ job.services.memcached.ports['11211'] }}
+        run: >
+          sh ./mvnw -B -ntp -s .github/maven-central-settings.xml
+          -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2"
+          -Dshiro.redis.test.container="${RETRY_REDIS_CONTAINER}"
+          -Dshiro.redis.test.port="${RETRY_REDIS_PORT}"
+          -Dshiro.memcached.test.port="${RETRY_MEMCACHED_PORT}"
+          clean verify
+
+      - name: Require coverage for modules with tests
+        run: |
+          for module in shiro-extension-core shiro-extension-spring shiro-extension-hazelcast3 shiro-extension-spring-redis4; do
+            test -s "${module}/target/jacoco.exec"
+            test -s "${module}/target/site/jacoco/jacoco.xml"
+          done
 
       - name: Upload JaCoCo coverage report
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: jacoco-coverage
-          path: target/site/jacoco
+          path: "**/target/site/jacoco"
           retention-days: 14
 
       - name: Upload surefire reports
@@ -75,5 +95,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: surefire-reports
-          path: target/surefire-reports
+          path: "**/target/surefire-reports"
           retention-days: 14
