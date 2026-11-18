@@ -18,6 +18,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 import javax.cache.Cache;
 import javax.cache.configuration.MutableConfiguration;
 import javax.cache.expiry.EternalExpiryPolicy;
@@ -97,6 +98,39 @@ public class SpringCredentialRetryStoreIntegrationTest {
         } finally {
             second.destroy();
             first.destroy();
+        }
+    }
+
+    @Test
+    public void importsSpringRedisLegacyCountersWithTheOriginalDeadline() throws Exception {
+        String port = System.getProperty("shiro.redis.test.port");
+        assumeTrue("Supply an isolated Redis port", Objects.nonNull(port));
+        String namespace = "test:spring-migrate:" + UUID.randomUUID();
+        LettuceConnectionFactory factory = connectionFactory(port);
+        try {
+            String legacyPrefix = namespace + ":legacy:";
+            RedisCacheManager manager = RedisCacheManager.builder(factory)
+                    .cacheDefaults(RedisCacheConfiguration.defaultCacheConfig()
+                            .computePrefixWith(name -> legacyPrefix).entryTtl(Duration.ofSeconds(5)))
+                    .transactionAware().build();
+            manager.afterPropertiesSet();
+            org.springframework.cache.Cache source = manager.getCache(REGION);
+            source.put("principal", new AtomicInteger(3));
+            long deadline = expiry(factory, namespace + ":legacy");
+            assertTrue(deadline > System.currentTimeMillis());
+
+            Function<Object, String> encoding = Object::toString;
+            assertTrue(SpringDataRedisCredentialRetryStores.migrateLegacyWindow(source, factory, namespace, encoding, "principal"));
+            assertFalse(SpringDataRedisCredentialRetryStores.migrateLegacyWindow(source, factory, namespace, encoding, "principal"));
+            assertFalse(SpringDataRedisCredentialRetryStores.migrateLegacyWindow(source, factory, namespace, encoding, "missing"));
+            assertEquals(3, source.get("principal", AtomicInteger.class).get());
+            assertEquals(deadline, expiry(factory, namespace));
+
+            Attempt next = redisStore(factory, namespace, false).reserve("principal");
+            assertEquals(4, next.getCount());
+            assertEquals(deadline, expiry(factory, namespace));
+        } finally {
+            factory.destroy();
         }
     }
 
