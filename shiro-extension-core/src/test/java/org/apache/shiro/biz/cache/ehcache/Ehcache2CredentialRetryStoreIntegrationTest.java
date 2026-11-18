@@ -14,6 +14,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import net.sf.ehcache.Cache;
 import net.sf.ehcache.CacheManager;
 import net.sf.ehcache.Element;
@@ -94,6 +95,33 @@ public class Ehcache2CredentialRetryStoreIntegrationTest {
                 false, 30, 10, closeToDeadline));
         assertEquals(2, store.reserve("ending").getCount());
         assertEquals(closeToDeadline + TimeUnit.SECONDS.toMillis(30), cache.getQuiet("ending").getExpirationTime());
+    }
+
+    @Test
+    public void adoptsLegacyCounterWithoutRestartingItsWindow() {
+        Cache cache = cache(30, 120);
+        Ehcache2CredentialRetryStore<String> first = new Ehcache2CredentialRetryStore<>(cache, Object::toString);
+        Ehcache2CredentialRetryStore<String> second = new Ehcache2CredentialRetryStore<>(cache, Object::toString);
+        long createdAt = System.currentTimeMillis() - TimeUnit.SECONDS.toMillis(5);
+        cache.put(new Element("principal", new AtomicInteger(3), 1, createdAt, createdAt, 0,
+                false, 30, 120, createdAt));
+        long expiry = cache.getQuiet("principal").getExpirationTime();
+
+        Attempt adopted = first.reserve("principal");
+        assertEquals(4, adopted.getCount());
+        Attempt next = second.reserve("principal");
+        assertEquals(5, next.getCount());
+        assertEquals(adopted.getWindowId(), next.getWindowId());
+        Element updated = cache.getQuiet("principal");
+        assertEquals(createdAt, updated.getCreationTime());
+        assertEquals(expiry, updated.getExpirationTime());
+        assertEquals(120, updated.getTimeToIdle());
+
+        cache.put(new Element("other-principal", new AtomicInteger(2)));
+        long otherExpiry = cache.getQuiet("other-principal").getExpirationTime();
+        first.clearIfCurrent("other-principal", "stale");
+        assertEquals(2, ((AtomicInteger) cache.getQuiet("other-principal").getObjectValue()).get());
+        assertEquals(otherExpiry, cache.getQuiet("other-principal").getExpirationTime());
     }
 
     @Test

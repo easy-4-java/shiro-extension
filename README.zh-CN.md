@@ -200,6 +200,8 @@ realm.setCredentialsMatcher(new DefaultCredentialsMatcher());
 
 如果匹配器的重试缓存名为 `login`，声明名为 `shiro.credential-retry.login` 的 `CredentialRetryStore` Bean。Spring Boot 会将它绑定到 `DefaultCredentialsMatcher` 和 `CredentialsRetryLimitCredentialsMatcher`，包括 Spring 管理的 Realm 内部创建的实例。手工指定的存储优先。缺少同名 Bean 时，匹配器沿用原 Shiro 缓存配置。共享重试窗口的应用实例应使用相同的缓存提供者、重试命名空间和主体键映射。
 
+对于现有 Ehcache 2 重试缓存，先停止访问该区域的全部旧版客户端，再启用共享重试存储，并沿用原区域及主体键。首次预留在键锁内转换已保存的旧计数，计入本次尝试，并保留原 TTL 截止时间和配置的空闲过期策略。集群部署使用强一致性区域。
+
 ## 8. Core Usage / API
 
 精选公开 API（类均位于 `org.apache.shiro.biz` 包下）：
