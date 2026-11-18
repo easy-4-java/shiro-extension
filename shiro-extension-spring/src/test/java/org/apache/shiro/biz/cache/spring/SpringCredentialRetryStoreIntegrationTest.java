@@ -16,6 +16,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import javax.cache.Cache;
 import javax.cache.configuration.MutableConfiguration;
 import javax.cache.expiry.EternalExpiryPolicy;
 import org.apache.shiro.authc.ExcessiveAttemptsException;
@@ -135,17 +137,19 @@ public class SpringCredentialRetryStoreIntegrationTest {
         HazelcastInstance member = Hazelcast.newHazelcastInstance(config);
         try (HazelcastServerCachingProvider provider = new HazelcastServerCachingProvider(member);
              javax.cache.CacheManager nativeManager = provider.getCacheManager()) {
-            nativeManager.createCache(REGION, new MutableConfiguration<Object, Attempt>()
-                    .setTypes(Object.class, Attempt.class)
+            Cache<Object, Object> region = nativeManager.createCache(REGION, new MutableConfiguration<Object, Object>()
+                    .setTypes(Object.class, Object.class)
                     .setExpiryPolicyFactory(EternalExpiryPolicy.factoryOf()));
+            region.put("principal", new AtomicInteger(3));
             JCacheCacheManager spring = new JCacheCacheManager(nativeManager);
             spring.afterPropertiesSet();
             SpringCacheManager shiro = new SpringCacheManager(spring);
             CredentialRetryStore a = shiro.getCredentialRetryStore(REGION, SpringJCacheCredentialRetryStores::fromCache);
             CredentialRetryStore b = shiro.getCredentialRetryStore(REGION, SpringJCacheCredentialRetryStores::fromCache);
             Attempt initial = a.reserve("principal");
+            assertEquals(4, initial.getCount());
             assertEquals(initial.getWindowId(), b.reserve("principal").getWindowId());
-            assertEquals(2, nativeManager.getCache(REGION, Object.class, Attempt.class).get("principal").getCount());
+            assertEquals(5, ((Attempt) region.get("principal")).getCount());
             b.clearIfCurrent("principal", initial.getWindowId());
             assertEquals(1, a.reserve("principal").getCount());
         } finally {

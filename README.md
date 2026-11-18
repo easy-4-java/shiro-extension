@@ -202,6 +202,8 @@ For an existing Ehcache 2 retry cache, stop all legacy clients of that region be
 
 For Hazelcast 5.2+ and 3.12, use the same cutover steps for the dedicated retry IMap. Deploy the retry-store module to every member and reuse the original map and principal keys. The first reservation converts the legacy counter atomically, retaining its remaining TTL and refreshing idle time under the existing policy. For the 3.12 adapter, supply the map's configured max idle explicitly.
 
+For a JCache retry region that already accepts both value types (for example, with value type `Object`), stop the legacy clients and reuse the region and principal keys. The JCache entry processor converts the saved counter and reserves the current attempt in one update. The region must use store-by-value and retain its creation deadline on access and update. Regions configured to accept only `AtomicInteger` require a separate cutover because they cannot store the new window format.
+
 ## 8. Core Usage / API
 
 Selected public API (all classes under `org.apache.shiro.biz`):
