@@ -3,6 +3,7 @@ package org.apache.shiro.biz.cache.ehcache;
 import java.io.Serializable;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -124,13 +125,55 @@ public class Ehcache3CredentialRetryStoreIntegrationTest {
     }
 
     @Test
-    public void rejectsARegionThatOnlyAcceptsTheLegacyCounterType() {
+    public void migratesAndReservesSerializedCountersInAnAtomicIntegerRegion() throws Exception {
+        AtomicLong time = new AtomicLong(10_000);
         try (CacheManager manager = CacheManagerBuilder.newCacheManagerBuilder()
+                .using(new TimeSourceConfiguration(time::get))
                 .withCache("legacy-only", CacheConfigurationBuilder.newCacheConfigurationBuilder(
-                        String.class, AtomicInteger.class, ResourcePoolsBuilder.heap(10)))
+                                String.class, AtomicInteger.class,
+                                ResourcePoolsBuilder.newResourcePoolsBuilder().offheap(2, MemoryUnit.MB))
+                        .withExpiry(Ehcache3CredentialRetryStore.fixedWindowExpiry(Duration.ofSeconds(3))))
                 .build(true)) {
             Cache<String, AtomicInteger> cache = manager.getCache("legacy-only", String.class, AtomicInteger.class);
-            assertThrows(IllegalArgumentException.class, () -> new Ehcache3CredentialRetryStore<>(cache, Object::toString));
+            cache.put("alice", new AtomicInteger(3));
+            cache.put("zero", new AtomicInteger(0));
+            Ehcache3CredentialRetryStore<String> first = new Ehcache3CredentialRetryStore<>(cache, Object::toString);
+            Ehcache3CredentialRetryStore<String> second = new Ehcache3CredentialRetryStore<>(cache, Object::toString);
+            time.set(12_000);
+
+            assertTrue(first.migrateLegacyWindow("alice"));
+            assertFalse(second.migrateLegacyWindow("alice"));
+            assertTrue(first.migrateLegacyWindow("zero"));
+            first.clearIfCurrent("zero", "stale");
+            assertEquals(1, second.reserve("zero").getCount());
+
+            Attempt initial = first.reserve("alice");
+            assertEquals(4, initial.getCount());
+            ExecutorService threads = Executors.newFixedThreadPool(2);
+            try {
+                List<Future<Attempt>> attempts = threads.invokeAll(Arrays.asList(
+                        () -> first.reserve("alice"), () -> second.reserve("alice")));
+                Set<Integer> counts = new HashSet<>();
+                for (Future<Attempt> attempt : attempts) {
+                    Attempt result = attempt.get(5, TimeUnit.SECONDS);
+                    assertEquals(initial.getWindowId(), result.getWindowId());
+                    counts.add(result.getCount());
+                }
+                assertEquals(new HashSet<>(Arrays.asList(5, 6)), counts);
+            } finally {
+                threads.shutdownNow();
+            }
+            assertEquals(6, cache.get("alice").get());
+            time.set(13_001);
+            assertNull(cache.get("alice"));
+            assertNull(cache.get("zero"));
+
+            Attempt renewed = second.reserve("alice");
+            assertNotEquals(initial.getWindowId(), renewed.getWindowId());
+            first.clearIfCurrent("alice", initial.getWindowId());
+            assertEquals(1, cache.get("alice").get());
+            second.clearIfCurrent("alice", renewed.getWindowId());
+            assertNull(cache.get("alice"));
         }
     }
 
