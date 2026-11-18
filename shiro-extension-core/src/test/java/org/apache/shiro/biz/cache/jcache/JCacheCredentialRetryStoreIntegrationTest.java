@@ -9,8 +9,10 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
@@ -22,12 +24,14 @@ import java.util.concurrent.atomic.AtomicInteger;
 import javax.cache.Cache;
 import javax.cache.CacheManager;
 import javax.cache.configuration.Factory;
+import javax.cache.configuration.FactoryBuilder;
 import javax.cache.configuration.MutableConfiguration;
 import javax.cache.expiry.CreatedExpiryPolicy;
 import javax.cache.expiry.Duration;
 import javax.cache.expiry.EternalExpiryPolicy;
 import javax.cache.expiry.ExpiryPolicy;
 import javax.cache.expiry.ModifiedExpiryPolicy;
+import javax.cache.integration.CacheLoader;
 import org.apache.shiro.biz.authc.credential.CredentialRetryStore.Attempt;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
@@ -198,6 +202,31 @@ public class JCacheCredentialRetryStoreIntegrationTest {
         awaitElapsed(start, 4400);
         assertNull(cache.get("alice"));
         assertFalse(store.restoreLegacyWindow("alice"));
+    }
+
+    @Test
+    public void restoreDoesNotLoadMissingWindows() {
+        String region = "legacy-restore-read-through";
+        Cache<Object, Object> cache = firstManager.createCache(region, new MutableConfiguration<Object, Object>()
+                .setTypes(Object.class, Object.class)
+                .setStoreByValue(true)
+                .setReadThrough(true)
+                .setCacheLoaderFactory(FactoryBuilder.factoryOf(ReadThroughRetryLoader.class)));
+        JCacheCredentialRetryStore store = new JCacheCredentialRetryStore(secondManager.getCache(region));
+        assertFalse(store.restoreLegacyWindow("alice"));
+        assertFalse(cache.containsKey("alice"));
+    }
+
+    public static final class ReadThroughRetryLoader implements CacheLoader<Object, Object> {
+        @Override
+        public Object load(Object principal) {
+            return new Attempt("loaded", 3);
+        }
+
+        @Override
+        public Map<Object, Object> loadAll(Iterable<?> principals) {
+            return Collections.emptyMap();
+        }
     }
 
     @Test
