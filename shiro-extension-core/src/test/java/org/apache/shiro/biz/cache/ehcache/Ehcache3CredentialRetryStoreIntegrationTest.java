@@ -1,5 +1,6 @@
 package org.apache.shiro.biz.cache.ehcache;
 
+import java.io.Serializable;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -10,6 +11,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import org.apache.shiro.biz.authc.credential.CredentialRetryStore.Attempt;
 import org.ehcache.Cache;
@@ -24,6 +26,7 @@ import org.ehcache.impl.internal.TimeSourceConfiguration;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
@@ -84,6 +87,50 @@ public class Ehcache3CredentialRetryStoreIntegrationTest {
             assertEquals(2, store.reserve("alice").getCount());
             store.clearIfCurrent("alice", renewed.getWindowId());
             assertNull(cache.get("alice"));
+        }
+    }
+
+    @Test
+    public void migratesOffHeapLegacyCountersWithoutRestartingTheDeadline() {
+        AtomicLong time = new AtomicLong(10_000);
+        try (CacheManager manager = CacheManagerBuilder.newCacheManagerBuilder()
+                .using(new TimeSourceConfiguration(time::get))
+                .withCache("legacy", CacheConfigurationBuilder.newCacheConfigurationBuilder(
+                                String.class, Serializable.class,
+                                ResourcePoolsBuilder.newResourcePoolsBuilder().offheap(2, MemoryUnit.MB))
+                        .withExpiry(Ehcache3CredentialRetryStore.fixedWindowExpiry(Duration.ofSeconds(3))))
+                .build(true)) {
+            Cache<String, Serializable> cache = manager.getCache("legacy", String.class, Serializable.class);
+            cache.put("alice", new AtomicInteger(3));
+            cache.put("zero", new AtomicInteger(0));
+            Ehcache3CredentialRetryStore<String> store = new Ehcache3CredentialRetryStore<>(cache, Object::toString);
+            time.set(12_000);
+
+            assertTrue(store.migrateLegacyWindow("alice"));
+            assertTrue(store.migrateLegacyWindow("zero"));
+            assertFalse(store.migrateLegacyWindow("missing"));
+            assertFalse(store.migrateLegacyWindow("alice"));
+            store.clearIfCurrent("zero", "stale");
+            assertEquals(1, store.reserve("zero").getCount());
+            Attempt preserved = store.reserve("alice");
+            assertEquals(4, preserved.getCount());
+            time.set(13_001);
+            assertNull(cache.get("alice"));
+            assertNull(cache.get("zero"));
+            Attempt renewed = store.reserve("alice");
+            assertEquals(1, renewed.getCount());
+            assertNotEquals(preserved.getWindowId(), renewed.getWindowId());
+        }
+    }
+
+    @Test
+    public void rejectsARegionThatOnlyAcceptsTheLegacyCounterType() {
+        try (CacheManager manager = CacheManagerBuilder.newCacheManagerBuilder()
+                .withCache("legacy-only", CacheConfigurationBuilder.newCacheConfigurationBuilder(
+                        String.class, AtomicInteger.class, ResourcePoolsBuilder.heap(10)))
+                .build(true)) {
+            Cache<String, AtomicInteger> cache = manager.getCache("legacy-only", String.class, AtomicInteger.class);
+            assertThrows(IllegalArgumentException.class, () -> new Ehcache3CredentialRetryStore<>(cache, Object::toString));
         }
     }
 
