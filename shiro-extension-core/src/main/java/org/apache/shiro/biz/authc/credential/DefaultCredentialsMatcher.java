@@ -27,6 +27,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Arrays;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -47,8 +48,32 @@ public class DefaultCredentialsMatcher extends CodecSupport implements Credentia
 
 	protected CacheManager cacheManager;
 
+    private volatile CredentialRetryStore credentialRetryStore;
+
+    /**
+     * Configures atomic retry accounting for this matcher's retry cache namespace.
+     *
+     * @param store provider-backed store, or null to use the existing Shiro cache integration
+     */
+    public void setCredentialRetryStore(CredentialRetryStore store) {
+        this.credentialRetryStore = store;
+    }
+
+    /**
+     * @return the configured retry store, or null when using the Shiro retry cache
+     */
+    public CredentialRetryStore getCredentialRetryStore() {
+        return credentialRetryStore;
+    }
+
 	@Override
 	public boolean doCredentialsMatch(AuthenticationToken token, AuthenticationInfo info) {
+        CredentialRetryStore store = credentialRetryStore;
+        if (Objects.nonNull(store)) {
+            return CredentialRetrySupport.match(store, token.getPrincipal(), getRetryLimit(),
+                    () -> credentialsMatch(token, info));
+        }
+
 		// check retry
 		checkCredentialsRetry(token);
 		// credentials match
@@ -56,7 +81,7 @@ public class DefaultCredentialsMatcher extends CodecSupport implements Credentia
 		if (matches) {
 			cacheManager.getCache(getCredentialsRetryCacheName()).remove(token.getPrincipal());
 		}
-		return credentialsMatch(token, info);
+		return matches;
 	}
 
 	//匹配用户输入的token的凭证（未加密）与系统提供的凭证（已加密） 

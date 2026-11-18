@@ -184,7 +184,7 @@ realm.setCredentialsMatcher(new DefaultCredentialsMatcher());
 
 ## 7. Configuration
 
-这是库：没有配置属性与属性前缀。行为通过构造器/Bean 注入配置：
+通过构造器和 Bean 配置扩展行为。
 
 | 扩展点 | 配置方式 |
 | :--- | :--- |
@@ -193,6 +193,26 @@ realm.setCredentialsMatcher(new DefaultCredentialsMatcher());
 | Realm 缓存 | `setCacheManager(CaffeineCacheManager / GuavaCacheManager / SpringCacheManager / SessionCacheManager)` |
 | 过滤器（`HttpServletShiroFilter` 等） | Bean 属性与 Shiro 过滤器链定义 |
 | i18n 消息 | 随包 `org/apache/shiro/biz/messages*.properties`、`ShiroBizMessageSource` |
+
+### Spring Boot 共享重试计数
+
+如果匹配器的重试缓存名为 `login`，声明名为 `shiro.credential-retry.login` 的 `CredentialRetryStore` Bean。Spring Boot 会将它绑定到 `DefaultCredentialsMatcher` 和 `CredentialsRetryLimitCredentialsMatcher`，包括 Spring 管理的 Realm 内部创建的实例。手工指定的存储优先。缺少同名 Bean 时，匹配器沿用原 Shiro 缓存配置。共享重试窗口的应用实例应使用相同的缓存提供者、重试命名空间和主体键映射。
+
+对于现有 Ehcache 2 重试缓存，先停止访问该区域的全部旧版客户端，再启用共享重试存储，并沿用原区域及主体键。首次预留在键锁内转换已保存的旧计数，计入本次尝试，并保留原 TTL 截止时间和配置的空闲过期策略。集群部署使用强一致性区域。
+
+原生 Ehcache 3 的切换需暂停全部重试客户端、排空在途写入，并为每个区域只安排一个迁移写入者。沿用原缓存，对每个已知主体调用 `migrateLegacyWindow`。原区域须已允许旧计数和新窗口两种值（例如值类型为 `Serializable`），并沿用创建时确定的截止时间或永久策略。存活条目原位替换，保留原截止时间。仅接受旧类型或写入会重置有效期的区域需要单独切换。
+
+Hazelcast 5.2+ 与 3.12 的独立重试 IMap 沿用同样的切换顺序。所有集群成员须部署重试存储模块，并沿用原 IMap 和主体键。首次预留会原子转换旧计数，保留剩余 TTL，并按原策略刷新空闲时间。使用 3.12 适配器时需传入 IMap 配置的最大空闲时长。
+
+对于原本就接受两种值类型的 JCache 重试区域（例如值类型为 `Object`），停止旧客户端后沿用原区域和主体键。JCache 条目处理器会在同一次更新中转换已保存的计数并预留本次尝试。区域必须按值存储，并在访问和更新时保留创建时确定的截止时间。值类型仅允许 `AtomicInteger` 的区域需要单独切换，因为该区域无法存储新窗口格式。
+
+对于 Spring Data Redis，切换期间暂停所有旧版和新版重试客户端，等在途缓存写入全部到达 Redis 后再导入。用原缓存和新存储使用的独立目标命名空间，对每个已知的字符串主体调用适配器的 `migrateLegacyWindow`。导入沿用源缓存的键和值序列化配置，复制已保存的计数与 Redis 绝对截止时间。源数据保留，跳过缺失、已过期和目标已存在的窗口。恢复客户端之前先核对本次提交的全部主体，并在同一切换窗口完成导入。启用空闲续期时，从下一次预留起应用原策略。
+
+J2Cache 的 Jedis 和 Lettuce 适配器也可在独占切换期间对已知字符串主体调用 `migrateLegacyWindow`。导入按原渠道的序列化方式读取 Redis 二级缓存计数，保留普通键或 Hash 区域的 Redis 截止时间，仅在目标窗口不存在时写入。沿用原缓存提供者配置，并指定独立的目标命名空间。迁移按 JVM 默认字符集写入的旧键时，沿用原字符集。Jedis 按原二进制键查询截止时间。对于非 UTF-8 的 Lettuce 旧键，除 UTF-8 目标连接外，还需传入二进制脚本连接。
+
+J2Cache Memcached 适配器也可在同一独占切换阶段导入已知主体。按原键路由传入保存旧值的源节点，该节点需允许在可信连接上使用无需认证的 Memcached Meta Text 协议。适配器同时读取旧值和剩余有效期，按服务端秒级精度确定绝对截止时间，保留原条目，仅在目标不存在时写入。仅支持二进制协议或需要认证的源节点需要独立迁移方式。
+
+对于 Redisson 3.12.5 的 `RMapCache` 重试区域，在同一独占切换阶段使用原缓存和主体调用 `migrateLegacyWindow`。导入复制原计数、条目固定截止时间、空闲策略和当前空闲截止时间，读取时不延长源窗口。若整个 Map 更早过期，使用更早的截止时间。同一 Redis 部署内使用独立的目标命名空间。
 
 ## 8. Core Usage / API
 

@@ -1,0 +1,279 @@
+package org.apache.shiro.biz.cache.spring;
+
+import com.hazelcast.cache.impl.HazelcastServerCachingProvider;
+import com.hazelcast.config.Config;
+import com.hazelcast.core.Hazelcast;
+import com.hazelcast.core.HazelcastInstance;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Arrays;
+import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
+import javax.cache.Cache;
+import javax.cache.configuration.MutableConfiguration;
+import javax.cache.expiry.EternalExpiryPolicy;
+import org.apache.shiro.authc.ExcessiveAttemptsException;
+import org.apache.shiro.authc.SimpleAuthenticationInfo;
+import org.apache.shiro.authc.UsernamePasswordToken;
+import org.apache.shiro.biz.authc.credential.CredentialRetryStore;
+import org.apache.shiro.biz.authc.credential.CredentialRetryStore.Attempt;
+import org.apache.shiro.biz.authc.credential.DefaultCredentialsMatcher;
+import org.apache.shiro.biz.authc.credential.spring.CredentialRetryStoreAutoConfiguration;
+import org.apache.shiro.cache.CacheException;
+import org.junit.Test;
+import org.springframework.cache.concurrent.ConcurrentMapCache;
+import org.springframework.cache.jcache.JCacheCacheManager;
+import org.springframework.cache.support.SimpleCacheManager;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
+import org.springframework.data.redis.cache.RedisCacheConfiguration;
+import org.springframework.data.redis.cache.RedisCacheManager;
+import org.springframework.data.redis.connection.RedisClusterConfiguration;
+import org.springframework.data.redis.connection.RedisClusterConnection;
+import org.springframework.data.redis.connection.RedisConnection;
+import org.springframework.data.redis.connection.ReturnType;
+import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
+import org.springframework.data.redis.serializer.StringRedisSerializer;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assume.assumeTrue;
+
+public class SpringCredentialRetryStoreIntegrationTest {
+
+    private static final String CLUSTER_NODES = "shiro.redis.test.cluster.nodes";
+    private static final String REGION = "credential-retry";
+    private static final StringRedisSerializer UTF_8 = StringRedisSerializer.UTF_8;
+
+    @Test
+    public void springRedisManagersShareAnAtomicRetryWindowWithTheirConfiguredTtl() throws Exception {
+        String port = System.getProperty("shiro.redis.test.port");
+        assumeTrue("Supply an isolated Redis port", Objects.nonNull(port));
+        String namespace = "test:spring-retry:" + UUID.randomUUID();
+        LettuceConnectionFactory first = connectionFactory(port);
+        LettuceConnectionFactory second = connectionFactory(port);
+        try {
+            CredentialRetryStore a = redisStore(first, namespace, false);
+            CredentialRetryStore b = redisStore(second, namespace, true);
+            Attempt initial = a.reserve("principal");
+            long deadline = expiry(first, namespace);
+            assertTrue(deadline > System.currentTimeMillis());
+            assertTrue(deadline <= System.currentTimeMillis() + 15_000);
+
+            ExecutorService workers = Executors.newFixedThreadPool(6);
+            try {
+                List<Callable<Attempt>> requests = new ArrayList<>();
+                for (int i = 0; i < 24; i++) {
+                    CredentialRetryStore selected = i % 2 == 0 ? a : b;
+                    requests.add(() -> selected.reserve("principal"));
+                }
+                Set<Integer> counts = new HashSet<>();
+                for (Future<Attempt> result : workers.invokeAll(requests, 10, TimeUnit.SECONDS)) {
+                    Attempt attempt = result.get();
+                    assertEquals(initial.getWindowId(), attempt.getWindowId());
+                    assertTrue(counts.add(attempt.getCount()));
+                }
+                assertEquals(24, counts.size());
+                assertTrue(counts.contains(2));
+                assertTrue(counts.contains(25));
+            } finally {
+                workers.shutdownNow();
+            }
+            assertEquals(deadline, expiry(second, namespace));
+            b.clearIfCurrent("principal", initial.getWindowId());
+            Attempt renewed = a.reserve("principal");
+            assertEquals(1, renewed.getCount());
+            assertNotEquals(initial.getWindowId(), renewed.getWindowId());
+            b.clearIfCurrent("principal", initial.getWindowId());
+            assertEquals(2, a.reserve("principal").getCount());
+        } finally {
+            second.destroy();
+            first.destroy();
+        }
+    }
+
+    @Test
+    public void importsSpringRedisLegacyCountersWithTheOriginalDeadline() throws Exception {
+        String port = System.getProperty("shiro.redis.test.port");
+        String nodes = System.getProperty(CLUSTER_NODES);
+        assumeTrue("Supply an isolated Redis port or cluster nodes", Objects.nonNull(port) || Objects.nonNull(nodes));
+        String namespace = "{retry-current}:test:spring-migrate:" + UUID.randomUUID();
+        LettuceConnectionFactory factory = migrationConnectionFactory(port, nodes);
+        try {
+            String legacyPrefix = "{retry-legacy}:test:spring-migrate:" + UUID.randomUUID() + ":";
+            verifyDifferentOwners(factory, legacyPrefix + "principal", namespace + ":principal");
+            RedisCacheManager manager = RedisCacheManager.builder(factory)
+                    .cacheDefaults(RedisCacheConfiguration.defaultCacheConfig()
+                            .computePrefixWith(name -> legacyPrefix).entryTtl(Duration.ofSeconds(5)))
+                    .transactionAware().build();
+            manager.afterPropertiesSet();
+            org.springframework.cache.Cache source = manager.getCache(REGION);
+            source.put("principal", new AtomicInteger(3));
+            long deadline = expiryKey(factory, legacyPrefix + "principal");
+            assertTrue(deadline > System.currentTimeMillis());
+
+            Function<Object, String> encoding = Object::toString;
+            assertTrue(SpringDataRedisCredentialRetryStores.migrateLegacyWindow(source, factory, namespace, encoding, "principal"));
+            assertFalse(SpringDataRedisCredentialRetryStores.migrateLegacyWindow(source, factory, namespace, encoding, "principal"));
+            assertFalse(SpringDataRedisCredentialRetryStores.migrateLegacyWindow(source, factory, namespace, encoding, "missing"));
+            assertEquals(3, source.get("principal", AtomicInteger.class).get());
+            assertEquals(deadline, expiry(factory, namespace));
+
+            Attempt next = redisStore(factory, namespace, false).reserve("principal");
+            assertEquals(4, next.getCount());
+            assertEquals(deadline, expiry(factory, namespace));
+        } finally {
+            factory.destroy();
+        }
+    }
+
+    @Test
+    public void springRedisEnforcesTheRetryLimitAcrossMatcherInstances() {
+        String port = System.getProperty("shiro.redis.test.port");
+        assumeTrue("Supply an isolated Redis port", Objects.nonNull(port));
+        String namespace = "test:spring-matcher:" + UUID.randomUUID();
+        LettuceConnectionFactory first = connectionFactory(port);
+        LettuceConnectionFactory second = connectionFactory(port);
+        try (var firstContext = matcherContext(first, namespace, false);
+             var secondContext = matcherContext(second, namespace, true)) {
+            var a = firstContext.getBean(DefaultCredentialsMatcher.class);
+            var b = secondContext.getBean(DefaultCredentialsMatcher.class);
+
+            var rejected = new UsernamePasswordToken("principal", "wrong");
+            var account = new SimpleAuthenticationInfo("principal", "correct", "realm");
+            assertFalse(a.doCredentialsMatch(rejected, account));
+            assertFalse(b.doCredentialsMatch(rejected, account));
+            assertThrows(ExcessiveAttemptsException.class, () -> a.doCredentialsMatch(rejected, account));
+        } finally {
+            second.destroy();
+            first.destroy();
+        }
+    }
+
+    @Test
+    public void unwrapsSpringJCacheThroughTheShiroCacheManager() {
+        Config config = new Config().setClusterName("shiro-spring-jcache-" + UUID.randomUUID());
+        config.setProperty("hazelcast.logging.type", "none");
+        config.setProperty("hazelcast.socket.bind.any", "false");
+        config.setProperty("hazelcast.operation.thread.count", "2");
+        config.setProperty("hazelcast.operation.generic.thread.count", "2");
+        config.setProperty("hazelcast.io.thread.count", "2");
+        config.setProperty("hazelcast.event.thread.count", "2");
+        config.getNetworkConfig().getInterfaces().setEnabled(true).addInterface("127.0.0.1");
+        config.getNetworkConfig().getJoin().getAutoDetectionConfig().setEnabled(false);
+        config.getNetworkConfig().getJoin().getMulticastConfig().setEnabled(false);
+        HazelcastInstance member = Hazelcast.newHazelcastInstance(config);
+        try (HazelcastServerCachingProvider provider = new HazelcastServerCachingProvider(member);
+             javax.cache.CacheManager nativeManager = provider.getCacheManager()) {
+            Cache<Object, Object> region = nativeManager.createCache(REGION, new MutableConfiguration<Object, Object>()
+                    .setTypes(Object.class, Object.class)
+                    .setExpiryPolicyFactory(EternalExpiryPolicy.factoryOf()));
+            region.put("principal", new AtomicInteger(3));
+            JCacheCacheManager spring = new JCacheCacheManager(nativeManager);
+            spring.afterPropertiesSet();
+            SpringCacheManager shiro = new SpringCacheManager(spring);
+            CredentialRetryStore a = shiro.getCredentialRetryStore(REGION, SpringJCacheCredentialRetryStores::fromCache);
+            CredentialRetryStore b = shiro.getCredentialRetryStore(REGION, SpringJCacheCredentialRetryStores::fromCache);
+            Attempt initial = a.reserve("principal");
+            assertEquals(4, initial.getCount());
+            assertEquals(initial.getWindowId(), b.reserve("principal").getWindowId());
+            assertEquals(5, ((Attempt) region.get("principal")).getCount());
+            b.clearIfCurrent("principal", initial.getWindowId());
+            assertEquals(1, a.reserve("principal").getCount());
+        } finally {
+            member.getLifecycleService().terminate();
+        }
+    }
+
+    @Test
+    public void reportsMissingRegionsAndRejectsCachesWithoutTheExpectedProvider() {
+        SimpleCacheManager spring = new SimpleCacheManager();
+        spring.setCaches(List.of(new ConcurrentMapCache(REGION)));
+        spring.afterPropertiesSet();
+        SpringCacheManager shiro = new SpringCacheManager(spring);
+        assertThrows(CacheException.class,
+                () -> shiro.getCredentialRetryStore("missing", SpringJCacheCredentialRetryStores::fromCache));
+        assertThrows(IllegalArgumentException.class,
+                () -> shiro.getCredentialRetryStore(REGION, SpringJCacheCredentialRetryStores::fromCache));
+    }
+
+    private static AnnotationConfigApplicationContext matcherContext(
+            LettuceConnectionFactory factory, String namespace, boolean transactionAware) {
+        var context = new AnnotationConfigApplicationContext();
+        context.register(CredentialRetryStoreAutoConfiguration.class);
+        context.registerBean(CredentialRetryStoreAutoConfiguration.STORE_BEAN_PREFIX + REGION,
+                CredentialRetryStore.class, () -> redisStore(factory, namespace, transactionAware));
+        context.registerBean(DefaultCredentialsMatcher.class, () -> {
+            var matcher = new DefaultCredentialsMatcher();
+            matcher.setRetryLimit(3);
+            matcher.setCredentialsRetryCacheName(REGION);
+            return matcher;
+        });
+        context.refresh();
+        return context;
+    }
+
+    private static LettuceConnectionFactory migrationConnectionFactory(String port, String nodes) {
+        if (Objects.isNull(nodes)) {
+            return connectionFactory(port);
+        }
+        LettuceConnectionFactory factory = new LettuceConnectionFactory(
+                new RedisClusterConfiguration(Arrays.asList(nodes.split(","))));
+        factory.afterPropertiesSet();
+        return factory;
+    }
+
+    private static void verifyDifferentOwners(LettuceConnectionFactory factory, String source, String destination) {
+        if (Objects.nonNull(System.getProperty(CLUSTER_NODES))) {
+            try (RedisClusterConnection cluster = factory.getClusterConnection()) {
+                String sourceOwner = cluster.clusterGetNodeForKey(UTF_8.serialize(source)).getId();
+                String destinationOwner = cluster.clusterGetNodeForKey(UTF_8.serialize(destination)).getId();
+                assertNotEquals("Migration must cross Redis primary nodes", sourceOwner, destinationOwner);
+            }
+        }
+    }
+
+    private static LettuceConnectionFactory connectionFactory(String port) {
+        LettuceConnectionFactory factory = new LettuceConnectionFactory("127.0.0.1", Integer.parseInt(port));
+        factory.afterPropertiesSet();
+        return factory;
+    }
+
+    private static CredentialRetryStore redisStore(LettuceConnectionFactory factory, String namespace,
+                                                   boolean transactionAware) {
+        var builder = RedisCacheManager.builder(factory)
+                .withCacheConfiguration(REGION, RedisCacheConfiguration.defaultCacheConfig()
+                        .entryTtl(Duration.ofSeconds(15)));
+        if (transactionAware) {
+            builder.transactionAware();
+        }
+        RedisCacheManager spring = builder.build();
+        spring.afterPropertiesSet();
+        return new SpringCacheManager(spring).getCredentialRetryStore(REGION,
+                cache -> SpringDataRedisCredentialRetryStores.fromCache(cache, factory, namespace, Object::toString));
+    }
+
+    private static long expiry(LettuceConnectionFactory factory, String namespace) {
+        return expiryKey(factory, namespace + ":principal");
+    }
+
+    private static long expiryKey(LettuceConnectionFactory factory, String key) {
+        try (RedisConnection connection = factory.getConnection()) {
+            return connection.scriptingCommands().eval(
+                    UTF_8.serialize("return redis.call('PEXPIRETIME', KEYS[1])"),
+                    ReturnType.INTEGER, 1, UTF_8.serialize(key));
+        }
+    }
+}

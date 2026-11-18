@@ -184,7 +184,7 @@ realm.setCredentialsMatcher(new DefaultCredentialsMatcher());
 
 ## 7. Configuration
 
-This is a library: there are no configuration properties or prefixes. Behavior is configured through constructor/bean injection:
+Configure behavior through constructors and beans.
 
 | Extension point | Configurable via |
 | :--- | :--- |
@@ -193,6 +193,26 @@ This is a library: there are no configuration properties or prefixes. Behavior i
 | Realm cache | `setCacheManager(CaffeineCacheManager / GuavaCacheManager / SpringCacheManager / SessionCacheManager)` |
 | Filters (`HttpServletShiroFilter` and friends) | bean properties and the Shiro filter-chain definition |
 | i18n messages | bundled `org/apache/shiro/biz/messages*.properties`, `ShiroBizMessageSource` |
+
+### Shared credential retry state in Spring Boot
+
+For a Spring-managed retry matcher with cache name `login`, declare a provider-backed `CredentialRetryStore` bean named `shiro.credential-retry.login`. Spring Boot binds it to `DefaultCredentialsMatcher` and `CredentialsRetryLimitCredentialsMatcher`, including instances held by Spring-managed realms. An explicitly assigned store takes precedence. Matchers without a matching bean keep their Shiro cache configuration. Use the same provider, retry namespace and principal key mapping across the instances that share the window.
+
+For an existing Ehcache 2 retry cache, stop all legacy clients of that region before enabling the shared store. Reuse the same region and principal keys. The first reservation upgrades the stored legacy counter under the key lock, counts the current attempt and keeps the original TTL deadline and the configured time-to-idle policy. Use a strongly consistent region when clustered.
+
+For native Ehcache 3, pause all retry clients, drain writes, and use exactly one migration writer per region. Call `migrateLegacyWindow` for each known principal using the original cache. The region must already accept both legacy counters and retry windows, such as with value type `Serializable`, and use creation-only or eternal expiry. Live entries are replaced in place with the existing deadline. A legacy-only value type or a policy that resets expiry on writes requires a separate cutover.
+
+For Hazelcast 5.2+ and 3.12, use the same cutover steps for the dedicated retry IMap. Deploy the retry-store module to every member and reuse the original map and principal keys. The first reservation converts the legacy counter atomically, retaining its remaining TTL and refreshing idle time under the existing policy. For the 3.12 adapter, supply the map's configured max idle explicitly.
+
+For a JCache retry region that already accepts both value types (for example, with value type `Object`), stop the legacy clients and reuse the region and principal keys. The JCache entry processor converts the saved counter and reserves the current attempt in one update. The region must use store-by-value and retain its creation deadline on access and update. Regions configured to accept only `AtomicInteger` require a separate cutover because they cannot store the new window format.
+
+For Spring Data Redis, pause all old and new retry clients and wait for outstanding cache writes to reach Redis before importing. Call the adapter’s `migrateLegacyWindow` for each known string principal with the original cache and the distinct destination namespace used by the new store. The import copies the saved count and absolute Redis expiry using the source cache’s key and value serializers. It leaves source entries intact and skips missing, expired, and occupied destinations. Reconcile the submitted principals before resuming clients and finish all imports during the same cutover. If the new policy uses time-to-idle, it applies on the next reservation.
+
+The J2Cache Jedis and Lettuce adapters also expose `migrateLegacyWindow` for each known string principal during an exclusive cutover. Import reads the saved L2 counter using the channel’s serializer, preserves the Redis deadline for generic keys or the hash region, and creates only absent destination windows. Keep the original provider configuration and use a distinct destination namespace. For legacy keys that use the JVM default charset, run migration with the charset that wrote the source region. Jedis routes the expiry lookup using the original binary key. For non-UTF-8 Lettuce keys, supply a binary scripting connection in addition to the UTF-8 destination connection.
+
+The J2Cache Memcached adapter can import a known principal during the same exclusive cutover. Pass the source server that owns the legacy key and accepts unauthenticated Memcached Meta Text on a trusted connection. The adapter reads the value and its remaining TTL together, determines the absolute deadline at server-second precision, retains the original entry, and creates the destination only if it is absent. Select source servers using the original key routing. Binary-only or authenticated source servers require a separate migration path.
+
+For a retry cache stored in a Redisson 3.12.5 `RMapCache`, pass the original cache and principal to `migrateLegacyWindow` during the same exclusive cutover. The adapter copies the count, entry lifetime, idle policy and current idle deadline without refreshing the source. It also honors a shorter map-wide expiry. Use a distinct destination namespace on the same Redis deployment.
 
 ## 8. Core Usage / API
 

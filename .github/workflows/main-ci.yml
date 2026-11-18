@@ -10,6 +10,20 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      redis:
+        image: redis:8.4.0
+        ports:
+          - 6379/tcp
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+      memcached:
+        image: memcached:1.6.45-alpine
+        ports:
+          - 11211/tcp
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-java@v5
@@ -20,18 +34,72 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: easy-4-java/jwt-issuer
-          ref: 6b1a4de65a12a155e98e957ea82e446ef6420b36
+          ref: c6edbf6a56a0c8ae6409b9fc1b0ef9639c4063d1
           path: .ci-dependencies/jwt-issuer
       - name: Verify and install JWT issuer
         run: mvn -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" -f .ci-dependencies/jwt-issuer/pom.xml clean install
       - name: Verify Shiro extension
-        run: mvn -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" clean verify
+        env:
+          RETRY_REDIS_CONTAINER: ${{ job.services.redis.id }}
+          RETRY_REDIS_PORT: ${{ job.services.redis.ports[6379] }}
+          RETRY_MEMCACHED_PORT: ${{ job.services.memcached.ports[11211] }}
+        run: mvn -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" -Dshiro.redis.test.container="${RETRY_REDIS_CONTAINER}" -Dshiro.redis.test.port="${RETRY_REDIS_PORT}" -Dshiro.memcached.test.port="${RETRY_MEMCACHED_PORT}" clean verify
+      - name: Verify J2Cache and Redisson retry migration on Redis Cluster
+        shell: bash
+        run: |
+          set -euo pipefail
+          containers=()
+          trap 'if (( ${#containers[@]} > 0 )); then docker rm -f "${containers[@]}" >/dev/null; fi' EXIT
+          nodes=()
+          for port in 16380 16381 16382; do
+            container=$(docker run -d --rm --network host redis:8.4.0 redis-server \
+              --bind 127.0.0.1 --port "$port" --cluster-enabled yes \
+              --cluster-announce-ip 127.0.0.1 --cluster-config-file nodes.conf \
+              --save '' --appendonly no)
+            containers+=("$container")
+            nodes+=("127.0.0.1:$port")
+            for attempt in {1..60}; do
+              if docker exec "$container" redis-cli -p "$port" ping | grep -qx PONG; then
+                break
+              fi
+              if (( attempt == 60 )); then
+                docker logs "$container"
+                exit 1
+              fi
+              sleep 0.25
+            done
+          done
+          timeout 30s docker exec "${containers[0]}" redis-cli --cluster create "${nodes[@]}" --cluster-replicas 0 --cluster-yes
+          cluster_nodes=$(IFS=,; printf '%s' "${nodes[*]}")
+          mvn -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" \
+            -pl shiro-extension-core -Dshiro.redis.test.cluster.nodes="$cluster_nodes" \
+            '-Dtest=J2CacheRedisClusterMigrationTest,RedissonCredentialRetryStoreIntegrationTest#migratesTheLegacyMapEntryWithoutRefreshingItsIdleDeadline+keepsMapExpiryAndImportsPersistentZeroCounts' test
+          mvn -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" \
+            -pl shiro-extension-core -Dshiro.redis.test.cluster.nodes="$cluster_nodes" \
+            -Dshiro.test.fileEncoding=ISO-8859-1 -Dshiro.redis.test.expectedCharset=ISO-8859-1 \
+            -Dsurefire.reportNameSuffix=latin1 -Dtest=J2CacheRedisClusterMigrationTest test
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          report = Path("shiro-extension-core/target/surefire-reports")
+          for name in ("J2CacheRedisClusterMigrationTest", "J2CacheRedisClusterMigrationTest-latin1", "RedissonCredentialRetryStoreIntegrationTest"):
+              suite = ElementTree.parse(next(report.glob(f"TEST-*{name}.xml"))).getroot()
+              if tuple(suite.get(key) for key in ("tests", "failures", "errors", "skipped")) != ("2", "0", "0", "0"):
+                  raise SystemExit(f"Expected two Redis Cluster migration tests without skips in {name}")
+          PYTHON
       - name: Require coverage for modules with existing tests
         run: |
           test -s .ci-dependencies/jwt-issuer/jwt-issuer-with-jjwt/target/jacoco.exec
           test -s .ci-dependencies/jwt-issuer/jwt-issuer-with-jjwt/target/site/jacoco/jacoco.xml
           test -s shiro-extension-core/target/jacoco.exec
           test -s shiro-extension-core/target/site/jacoco/jacoco.xml
+          test -s shiro-extension-spring/target/jacoco.exec
+          test -s shiro-extension-spring/target/site/jacoco/jacoco.xml
+          test -s shiro-extension-hazelcast3/target/jacoco.exec
+          test -s shiro-extension-hazelcast3/target/site/jacoco/jacoco.xml
+          test -s shiro-extension-spring-redis4/target/jacoco.exec
+          test -s shiro-extension-spring-redis4/target/site/jacoco/jacoco.xml
       - uses: actions/upload-artifact@v7
         if: always()
         with:
