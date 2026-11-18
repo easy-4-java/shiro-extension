@@ -67,13 +67,50 @@ jobs:
           RETRY_REDIS_CONTAINER: ${{ job.services.redis.id }}
           RETRY_REDIS_PORT: ${{ job.services.redis.ports['6379'] }}
           RETRY_MEMCACHED_PORT: ${{ job.services.memcached.ports['11211'] }}
-        run: >
-          sh ./mvnw -B -ntp -s .github/maven-central-settings.xml
-          -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2"
-          -Dshiro.redis.test.container="${RETRY_REDIS_CONTAINER}"
-          -Dshiro.redis.test.port="${RETRY_REDIS_PORT}"
-          -Dshiro.memcached.test.port="${RETRY_MEMCACHED_PORT}"
-          clean verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          auth_file=$(mktemp "${RUNNER_TEMP}/memcached-auth.XXXXXX")
+          auth_container=
+          cleanup() {
+            if [[ -n "$auth_container" ]]; then
+              docker rm -f "$auth_container" >/dev/null
+            fi
+            rm -f "$auth_file"
+          }
+          trap cleanup EXIT
+          # Local CI fixture only. The container reads this as its non-root user.
+          printf '%s\n' 'fixture-user:fixture-password' > "$auth_file"
+          chmod 0644 "$auth_file"
+          auth_container=$(docker run -d --publish 127.0.0.1::11211/tcp \
+            --mount "type=bind,src=$auth_file,dst=/memcached-auth,readonly" \
+            memcached:1.6.45-alpine memcached -U 0 -Y /memcached-auth)
+          binding=$(docker port "$auth_container" 11211/tcp)
+          auth_port=${binding##*:}
+          [[ "$auth_port" =~ ^[0-9]+$ ]]
+          for attempt in {1..40}; do
+            if (: < "/dev/tcp/127.0.0.1/$auth_port") 2>/dev/null; then
+              break
+            fi
+            if (( attempt == 40 )); then
+              docker logs "$auth_container"
+              exit 1
+            fi
+            sleep 0.25
+          done
+          sh ./mvnw -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" \
+            -Dshiro.redis.test.container="$RETRY_REDIS_CONTAINER" -Dshiro.redis.test.port="$RETRY_REDIS_PORT" \
+            -Dshiro.memcached.test.port="$RETRY_MEMCACHED_PORT" -Dshiro.memcached.auth.test.port="$auth_port" clean verify
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          reports = Path("shiro-extension-core/target/surefire-reports")
+          suite = ElementTree.parse(next(reports.glob("TEST-*J2CacheMemcachedCredentialRetryStoreIntegrationTest.xml")))
+          case = suite.find('./testcase[@name="importsThroughAnAuthenticatedMetaConnectionWithItsOriginalDeadline"]')
+          if case is None or any(case.find(status) is not None for status in ("failure", "error", "skipped")):
+              raise SystemExit("Expected an executed, successful authenticated Memcached migration test")
+          PYTHON
 
       - name: Verify J2Cache and Redisson retry migration on Redis Cluster
         shell: bash

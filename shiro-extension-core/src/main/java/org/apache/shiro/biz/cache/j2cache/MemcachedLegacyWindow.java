@@ -29,51 +29,55 @@ class MemcachedLegacyWindow {
     int deadline;
 
     static MemcachedLegacyWindow read(InetSocketAddress source, String key, int timeoutMillis) throws IOException {
+        try (Socket socket = new Socket()) {
+            socket.connect(source, timeoutMillis);
+            socket.setSoTimeout(timeoutMillis);
+            return read(socket, key);
+        }
+    }
+
+    static MemcachedLegacyWindow read(Socket socket, String key) throws IOException {
         byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
         if (keyBytes.length == 0 || keyBytes.length > 250) {
             throw new IllegalArgumentException("Invalid legacy Memcached key length");
         }
         String request = "mg " + Base64.getEncoder().encodeToString(keyBytes) + " b t f v u";
-        try (Socket socket = new Socket()) {
-            socket.connect(source, timeoutMillis);
-            socket.setSoTimeout(timeoutMillis);
-            DataInputStream input = new DataInputStream(new BufferedInputStream(socket.getInputStream()));
-            OutputStream output = socket.getOutputStream();
-            for (int attempt = 0; attempt < MAX_CLOCK_ATTEMPTS; attempt++) {
-                long before = time(input, output);
-                command(output, request);
-                String response = line(input);
-                if ("EN".equals(response)) {
-                    return null;
-                }
-                String[] fields = StringUtils.split(response);
-                if (Objects.isNull(fields) || fields.length < 4 || !"VA".equals(fields[0])) {
-                    throw new CacheException("Memcached source does not support meta value and expiry reads");
-                }
-                int bytes = Integer.parseInt(fields[1]);
-                if (bytes <= 0 || bytes > MAX_COUNTER_BYTES) {
-                    throw new CacheException("Invalid legacy Memcached counter size");
-                }
-                int ttl = Integer.parseInt(flag(fields, 't'));
-                int flags = Integer.parseUnsignedInt(flag(fields, 'f'));
-                byte[] payload = new byte[bytes];
-                input.readFully(payload);
-                if (StringUtils.isNotEmpty(line(input))) {
-                    throw new CacheException("Invalid legacy Memcached value terminator");
-                }
-                if (ttl == 0) {
-                    return null;
-                }
-                if (ttl == -1) {
-                    return decode(payload, flags, 0);
-                }
-                if (ttl < -1) {
-                    throw new CacheException("Invalid legacy Memcached expiry");
-                }
-                // Both samples must belong to the server second in which it computed the remaining TTL.
-                if (before == time(input, output)) {
-                    return decode(payload, flags, Math.toIntExact(before + ttl));
-                }
+        DataInputStream input = new DataInputStream(new BufferedInputStream(socket.getInputStream()));
+        OutputStream output = socket.getOutputStream();
+        for (int attempt = 0; attempt < MAX_CLOCK_ATTEMPTS; attempt++) {
+            long before = time(input, output);
+            command(output, request);
+            String response = line(input);
+            if ("EN".equals(response)) {
+                return null;
+            }
+            String[] fields = StringUtils.split(response);
+            if (Objects.isNull(fields) || fields.length < 4 || !"VA".equals(fields[0])) {
+                throw new CacheException("Memcached source does not support meta value and expiry reads");
+            }
+            int bytes = Integer.parseInt(fields[1]);
+            if (bytes <= 0 || bytes > MAX_COUNTER_BYTES) {
+                throw new CacheException("Invalid legacy Memcached counter size");
+            }
+            int ttl = Integer.parseInt(flag(fields, 't'));
+            int flags = Integer.parseUnsignedInt(flag(fields, 'f'));
+            byte[] payload = new byte[bytes];
+            input.readFully(payload);
+            if (StringUtils.isNotEmpty(line(input))) {
+                throw new CacheException("Invalid legacy Memcached value terminator");
+            }
+            if (ttl == 0) {
+                return null;
+            }
+            if (ttl == -1) {
+                return decode(payload, flags, 0);
+            }
+            if (ttl < -1) {
+                throw new CacheException("Invalid legacy Memcached expiry");
+            }
+            // Both samples must belong to the server second in which it computed the remaining TTL.
+            if (before == time(input, output)) {
+                return decode(payload, flags, Math.toIntExact(before + ttl));
             }
         }
         throw new CacheException("Could not determine the legacy Memcached deadline at server precision");
