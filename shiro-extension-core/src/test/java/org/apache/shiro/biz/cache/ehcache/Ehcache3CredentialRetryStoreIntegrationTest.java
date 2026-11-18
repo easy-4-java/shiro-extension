@@ -177,6 +177,62 @@ public class Ehcache3CredentialRetryStoreIntegrationTest {
     }
 
     @Test
+    public void restoresLegacyCountersWithoutRestartingTheDeadline() {
+        assertLegacyRestore(Serializable.class);
+        assertLegacyRestore(AtomicInteger.class);
+    }
+
+    private <V> void assertLegacyRestore(Class<V> valueType) {
+        AtomicLong time = new AtomicLong(10_000);
+        try (CacheManager manager = CacheManagerBuilder.newCacheManagerBuilder()
+                .using(new TimeSourceConfiguration(time::get))
+                .withCache("legacy", CacheConfigurationBuilder.newCacheConfigurationBuilder(
+                                String.class, valueType,
+                                ResourcePoolsBuilder.newResourcePoolsBuilder().offheap(2, MemoryUnit.MB))
+                        .withExpiry(Ehcache3CredentialRetryStore.fixedWindowExpiry(Duration.ofSeconds(3))))
+                .build(true)) {
+            Cache<String, V> cache = manager.getCache("legacy", String.class, valueType);
+            cache.put("alice", valueType.cast(new AtomicInteger(3)));
+            cache.put("zero", valueType.cast(new AtomicInteger(0)));
+            cache.put("untouched", valueType.cast(new AtomicInteger(5)));
+            Ehcache3CredentialRetryStore<String> store = new Ehcache3CredentialRetryStore<>(cache, Object::toString);
+            assertTrue(store.migrateLegacyWindow("alice"));
+            assertTrue(store.migrateLegacyWindow("zero"));
+            Attempt attempt = store.reserve("alice");
+            time.set(12_000);
+
+            assertTrue(store.restoreLegacyWindow("alice"));
+            assertTrue(store.restoreLegacyWindow("zero"));
+            assertFalse(store.restoreLegacyWindow("missing"));
+            assertFalse(store.restoreLegacyWindow("alice"));
+            assertFalse(store.restoreLegacyWindow("untouched"));
+            store.clearIfCurrent("alice", attempt.getWindowId());
+
+            assertEquals(AtomicInteger.class, cache.get("alice").getClass());
+            assertEquals(4, ((AtomicInteger) cache.get("alice")).get());
+            assertEquals(AtomicInteger.class, cache.get("zero").getClass());
+            assertEquals(0, ((AtomicInteger) cache.get("zero")).get());
+            assertEquals(5, ((AtomicInteger) cache.get("untouched")).get());
+            time.set(13_001);
+            assertNull(cache.get("alice"));
+            assertNull(cache.get("zero"));
+            assertFalse(store.restoreLegacyWindow("alice"));
+        }
+    }
+
+    @Test
+    public void rejectsLegacyRestoreWhenTheRegionAcceptsOnlyAttempts() {
+        try (CacheManager manager = manager(new AtomicLong(10_000),
+                Ehcache3CredentialRetryStore.fixedWindowExpiry(Duration.ofSeconds(3)))) {
+            Cache<String, Attempt> cache = manager.getCache("retry", String.class, Attempt.class);
+            Ehcache3CredentialRetryStore<String> store = new Ehcache3CredentialRetryStore<>(cache, Object::toString);
+            Attempt original = store.reserve("alice");
+            assertThrows(IllegalArgumentException.class, () -> store.restoreLegacyWindow("alice"));
+            assertEquals(original, cache.get("alice"));
+        }
+    }
+
+    @Test
     public void rejectsPoliciesThatReplaceExpiryOnWrites() {
         try (CacheManager manager = manager(new AtomicLong(10_000),
                 ExpiryPolicyBuilder.timeToLiveExpiration(Duration.ofSeconds(5)))) {
