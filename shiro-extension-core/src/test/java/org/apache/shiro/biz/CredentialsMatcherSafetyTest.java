@@ -140,6 +140,58 @@ public class CredentialsMatcherSafetyTest {
         assertEquals(1, store.attempts.get("alice").getCount());
     }
 
+    @Test
+    public void reservationFailureStopsComparisonAndPropagates() {
+        IllegalStateException failure = new IllegalStateException("retry reservation failed");
+        AtomicInteger comparisons = new AtomicInteger();
+        DefaultCredentialsMatcher matcher = new DefaultCredentialsMatcher() {
+            @Override
+            protected boolean credentialsMatch(AuthenticationToken token, AuthenticationInfo info) {
+                comparisons.incrementAndGet();
+                return true;
+            }
+        };
+        matcher.setCredentialRetryStore(new CredentialRetryStore() {
+            @Override
+            public Attempt reserve(Object principal) {
+                throw failure;
+            }
+
+            @Override
+            public void clearIfCurrent(Object principal, String windowId) {
+                fail("reservation failed before there was a window to clear");
+            }
+        });
+
+        assertSame(failure, assertThrows(IllegalStateException.class,
+                () -> matcher.doCredentialsMatch(token("alice", "secret"), account(false))));
+        assertEquals(0, comparisons.get());
+    }
+
+    @Test
+    public void failedWindowClearCannotReportSuccessfulAuthentication() {
+        IllegalStateException failure = new IllegalStateException("retry reset failed");
+        TestRetryStore backingStore = new TestRetryStore();
+        for (boolean hashed : new boolean[]{false, true}) {
+            CredentialRetryStore store = new CredentialRetryStore() {
+                @Override
+                public Attempt reserve(Object principal) {
+                    return backingStore.reserve(principal);
+                }
+
+                @Override
+                public void clearIfCurrent(Object principal, String windowId) {
+                    assertEquals(backingStore.attempts.get(principal).getWindowId(), windowId);
+                    throw failure;
+                }
+            };
+            CredentialsMatcher matcher = matcher(hashed, store);
+            assertSame(failure, assertThrows(IllegalStateException.class,
+                    () -> matcher.doCredentialsMatch(token("alice", "secret"), account(hashed))));
+        }
+        assertEquals(2, backingStore.attempts.get("alice").getCount());
+    }
+
     private static CredentialsMatcher matcher(boolean hashed, CredentialRetryStore store) {
         if (hashed) {
             CredentialsRetryLimitCredentialsMatcher matcher = new CredentialsRetryLimitCredentialsMatcher();
