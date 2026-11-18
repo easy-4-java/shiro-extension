@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Arrays;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -37,6 +38,8 @@ import org.springframework.cache.support.SimpleCacheManager;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.data.redis.cache.RedisCacheConfiguration;
 import org.springframework.data.redis.cache.RedisCacheManager;
+import org.springframework.data.redis.connection.RedisClusterConfiguration;
+import org.springframework.data.redis.connection.RedisClusterConnection;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.connection.ReturnType;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
@@ -51,6 +54,7 @@ import static org.junit.Assume.assumeTrue;
 
 public class SpringCredentialRetryStoreIntegrationTest {
 
+    private static final String CLUSTER_NODES = "shiro.redis.test.cluster.nodes";
     private static final String REGION = "credential-retry";
     private static final StringRedisSerializer UTF_8 = StringRedisSerializer.UTF_8;
 
@@ -104,11 +108,13 @@ public class SpringCredentialRetryStoreIntegrationTest {
     @Test
     public void importsSpringRedisLegacyCountersWithTheOriginalDeadline() throws Exception {
         String port = System.getProperty("shiro.redis.test.port");
-        assumeTrue("Supply an isolated Redis port", Objects.nonNull(port));
-        String namespace = "test:spring-migrate:" + UUID.randomUUID();
-        LettuceConnectionFactory factory = connectionFactory(port);
+        String nodes = System.getProperty(CLUSTER_NODES);
+        assumeTrue("Supply an isolated Redis port or cluster nodes", Objects.nonNull(port) || Objects.nonNull(nodes));
+        String namespace = "{retry-current}:test:spring-migrate:" + UUID.randomUUID();
+        LettuceConnectionFactory factory = migrationConnectionFactory(port, nodes);
         try {
-            String legacyPrefix = namespace + ":legacy:";
+            String legacyPrefix = "{retry-legacy}:test:spring-migrate:" + UUID.randomUUID() + ":";
+            verifyDifferentOwners(factory, legacyPrefix + "principal", namespace + ":principal");
             RedisCacheManager manager = RedisCacheManager.builder(factory)
                     .cacheDefaults(RedisCacheConfiguration.defaultCacheConfig()
                             .computePrefixWith(name -> legacyPrefix).entryTtl(Duration.ofSeconds(5)))
@@ -116,7 +122,7 @@ public class SpringCredentialRetryStoreIntegrationTest {
             manager.afterPropertiesSet();
             org.springframework.cache.Cache source = manager.getCache(REGION);
             source.put("principal", new AtomicInteger(3));
-            long deadline = expiry(factory, namespace + ":legacy");
+            long deadline = expiryKey(factory, legacyPrefix + "principal");
             assertTrue(deadline > System.currentTimeMillis());
 
             Function<Object, String> encoding = Object::toString;
@@ -220,6 +226,26 @@ public class SpringCredentialRetryStoreIntegrationTest {
         return context;
     }
 
+    private static LettuceConnectionFactory migrationConnectionFactory(String port, String nodes) {
+        if (Objects.isNull(nodes)) {
+            return connectionFactory(port);
+        }
+        LettuceConnectionFactory factory = new LettuceConnectionFactory(
+                new RedisClusterConfiguration(Arrays.asList(nodes.split(","))));
+        factory.afterPropertiesSet();
+        return factory;
+    }
+
+    private static void verifyDifferentOwners(LettuceConnectionFactory factory, String source, String destination) {
+        if (Objects.nonNull(System.getProperty(CLUSTER_NODES))) {
+            try (RedisClusterConnection cluster = factory.getClusterConnection()) {
+                String sourceOwner = cluster.clusterGetNodeForKey(UTF_8.serialize(source)).getId();
+                String destinationOwner = cluster.clusterGetNodeForKey(UTF_8.serialize(destination)).getId();
+                assertNotEquals("Migration must cross Redis primary nodes", sourceOwner, destinationOwner);
+            }
+        }
+    }
+
     private static LettuceConnectionFactory connectionFactory(String port) {
         LettuceConnectionFactory factory = new LettuceConnectionFactory("127.0.0.1", Integer.parseInt(port));
         factory.afterPropertiesSet();
@@ -241,10 +267,14 @@ public class SpringCredentialRetryStoreIntegrationTest {
     }
 
     private static long expiry(LettuceConnectionFactory factory, String namespace) {
+        return expiryKey(factory, namespace + ":principal");
+    }
+
+    private static long expiryKey(LettuceConnectionFactory factory, String key) {
         try (RedisConnection connection = factory.getConnection()) {
             return connection.scriptingCommands().eval(
                     UTF_8.serialize("return redis.call('PEXPIRETIME', KEYS[1])"),
-                    ReturnType.INTEGER, 1, UTF_8.serialize(namespace + ":principal"));
+                    ReturnType.INTEGER, 1, UTF_8.serialize(key));
         }
     }
 }
