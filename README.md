@@ -110,6 +110,7 @@ The Maven parent builds the following modules.
 | :--- | :--- |
 | `shiro-extension-core` | Spring-independent Shiro authentication, authorization, cache, session, servlet and utility extensions |
 | `shiro-extension-spring` | Spring handlers, filters, message source, scheduling and Shiro-Spring integration; depends on core |
+| `shiro-extension-ehcache3` | Optional native Ehcache 3 cache adapter for Shiro 3 using Jakarta JAXB. Preserves configured cache regions and expiration policies. |
 | `shiro-extension-hazelcast3` | Optional Hazelcast 3.12 IMap credential retry adapter |
 | `shiro-extension-spring-redis4` | Optional Spring Data Redis 4 credential retry adapter |
 

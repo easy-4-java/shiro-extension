@@ -1,0 +1,8 @@
+The Ehcache adapter is derived from ehcache-shiro 1.0.0.
+Copyright Terracotta, Inc.
+https://github.com/ehcache/ehcache-shiro
+
+Apache License, Version 2.0
+https://www.apache.org/licenses/LICENSE-2.0
+
+Changes by easy4j align the source with Apache Shiro 3 and Jakarta JAXB.
