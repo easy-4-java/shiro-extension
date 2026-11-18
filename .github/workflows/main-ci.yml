@@ -72,22 +72,28 @@ jobs:
           binary_container=$(docker run -d --publish 127.0.0.1::11211/tcp \
             memcached:1.6.45-alpine memcached -U 0 -B binary)
           warm_container=$(docker run -d --user 0 --publish 127.0.0.1::11211/tcp \
+            --mount "type=bind,src=$auth_file,dst=/memcached-auth,readonly" \
             --tmpfs /state:rw,size=96m memcached:1.6.45-alpine sh -ec '
               chown memcache /state
-              memcached -u memcache -U 0 -m 64 -B binary -e /state/memory &
+              mkdir -p /etc/sasl2
+              printf "%s\n" "mech_list: plain" >/etc/sasl2/memcached.conf
+              sed "s/:/@$(hostname):/" /memcached-auth >/state/sasl-auth
+              chown memcache /state/sasl-auth
+              chmod 0600 /state/sasl-auth
+              MEMCACHED_SASL_PWDB=/state/sasl-auth memcached -u memcache -U 0 -m 64 -S -e /state/memory &
               child=$!
               echo "$child" >/state/source.pid
               wait "$child"
               # The server requires the clock to advance beyond the saved stop second.
               sleep 2
-              exec memcached -u memcache -U 0 -m 64 -B ascii -e /state/memory
+              exec memcached -u memcache -U 0 -m 64 -Y /memcached-auth -e /state/memory
             ')
           ready_port() {
             local container=$1 binding port
             binding=$(docker port "$container" 11211/tcp)
             port=${binding##*:}
             [[ "$port" =~ ^[0-9]+$ ]] || return 1
-            for attempt in {1..40}; do
+            for _ in {1..40}; do
               if (: < "/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
                 printf '%s\n' "$port"
                 return
@@ -114,7 +120,7 @@ jobs:
           for name in (
               "importsThroughAnAuthenticatedMetaConnectionWithItsOriginalDeadline",
               "refusesToImportWhenOnlyTheBinaryProtocolCanReadTheCounter",
-              "importsLegacyWindowsAfterBinarySourceWarmRestart",
+              "importsLegacyWindowsAfterSaslSourceWarmRestart",
           ):
               case = suite.find(f'./testcase[@name="{name}"]')
               if case is None or any(case.find(status) is not None for status in ("failure", "error", "skipped")):

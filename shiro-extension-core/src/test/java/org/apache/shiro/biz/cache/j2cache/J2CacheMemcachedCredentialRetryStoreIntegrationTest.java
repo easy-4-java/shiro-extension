@@ -4,6 +4,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URLDecoder;
@@ -30,6 +31,7 @@ import net.oschina.j2cache.Level2Cache;
 import net.oschina.j2cache.util.SerializationUtils;
 import net.rubyeye.xmemcached.MemcachedClient;
 import net.rubyeye.xmemcached.XMemcachedClientBuilder;
+import net.rubyeye.xmemcached.auth.AuthInfo;
 import net.rubyeye.xmemcached.command.BinaryCommandFactory;
 import net.rubyeye.xmemcached.transcoders.CachedData;
 import net.rubyeye.xmemcached.transcoders.SerializingTranscoder;
@@ -52,6 +54,8 @@ import static org.junit.Assume.assumeTrue;
 public class J2CacheMemcachedCredentialRetryStoreIntegrationTest {
 
     private static final String REGION = "credential-retry";
+    private static final String FIXTURE_USER = "fixture-user";
+    private static final String FIXTURE_PASSWORD = "fixture-password";
     private final String namespace = "test:memcached-retry:" + UUID.randomUUID();
     private String endpoint;
     private MemcachedClient firstClient;
@@ -161,7 +165,6 @@ public class J2CacheMemcachedCredentialRetryStoreIntegrationTest {
         J2CacheConfig config = config(true, "30s");
         String principal = "authenticated-cutover";
         int deadline = Math.toIntExact(Instant.now().getEpochSecond() + 15);
-        byte[] credentials = "fixture-user fixture-password".getBytes(StandardCharsets.US_ASCII);
         CachedData seed = new SerializingTranscoder().encode(SerializationUtils.serialize(new AtomicInteger(3)));
         byte[] payload = seed.getData();
         try (Socket source = new Socket("127.0.0.1", Integer.parseInt(authPort));
@@ -169,11 +172,7 @@ public class J2CacheMemcachedCredentialRetryStoreIntegrationTest {
             source.setSoTimeout(3000);
             BufferedReader reply = new BufferedReader(new InputStreamReader(source.getInputStream(), StandardCharsets.US_ASCII));
             OutputStream requests = source.getOutputStream();
-            requests.write(("set auth 0 0 " + credentials.length + "\r\n").getBytes(StandardCharsets.US_ASCII));
-            requests.write(credentials);
-            requests.write("\r\n".getBytes(StandardCharsets.US_ASCII));
-            requests.flush();
-            assertEquals("STORED", reply.readLine());
+            assertEquals("STORED", authenticateMeta(source, reply));
             String set = "set " + REGION + ":" + principal + " " + seed.getFlag() + " " + deadline
                     + " " + payload.length + "\r\n";
             requests.write(set.getBytes(StandardCharsets.US_ASCII));
@@ -222,12 +221,14 @@ public class J2CacheMemcachedCredentialRetryStoreIntegrationTest {
     }
 
     @Test
-    public void importsLegacyWindowsAfterBinarySourceWarmRestart() throws Exception {
+    public void importsLegacyWindowsAfterSaslSourceWarmRestart() throws Exception {
         String sourcePort = System.getProperty("shiro.memcached.warm.test.port");
         String container = System.getProperty("shiro.memcached.warm.test.container");
         assumeTrue("Supply a dedicated warm-restart Memcached fixture",
                 Objects.nonNull(sourcePort) && Objects.nonNull(container));
-        InetSocketAddress source = AddrUtil.getOneAddress("127.0.0.1:" + sourcePort);
+        InetAddress loopback = InetAddress.getByName("127.0.0.1");
+        // XMemcached indexes credentials by the connected socket's resolved host string.
+        InetSocketAddress source = new InetSocketAddress(loopback.getHostName(), Integer.parseInt(sourcePort));
         SerializationUtils.init("java", new Properties());
         SerializingTranscoder transcoder = new SerializingTranscoder();
         String principal = "warm-" + UUID.randomUUID();
@@ -236,7 +237,10 @@ public class J2CacheMemcachedCredentialRetryStoreIntegrationTest {
         int deadline = Math.toIntExact(Instant.now().getEpochSecond() + 60);
         byte[] counter = SerializationUtils.serialize(new AtomicInteger(3));
         byte[] zero = SerializationUtils.serialize(new AtomicInteger(0));
-        MemcachedClient legacy = client("127.0.0.1:" + sourcePort);
+        var builder = new XMemcachedClientBuilder(List.of(source));
+        builder.setCommandFactory(new BinaryCommandFactory());
+        builder.addAuthInfo(source, AuthInfo.plain(FIXTURE_USER, FIXTURE_PASSWORD));
+        MemcachedClient legacy = builder.build();
         try {
             assertTrue(legacy.set(REGION + ":" + principal, deadline, counter, transcoder));
             assertTrue(legacy.set(REGION + ":" + persistent, 0, zero, transcoder));
@@ -248,16 +252,22 @@ public class J2CacheMemcachedCredentialRetryStoreIntegrationTest {
                 "kill -USR1 \"$(cat /state/source.pid)\"").inheritIO().start();
         assertTrue("Graceful stop command timed out", stop.waitFor(10, TimeUnit.SECONDS));
         assertEquals("Graceful stop command failed", 0, stop.exitValue());
-        awaitMetaListener(source);
+        awaitAuthenticatedMetaListener(source);
 
         J2CacheConfig config = config(true, "30s");
-        try (CacheChannel channel = J2CacheTestChannel.open(config)) {
+        try (Socket restoredSource = new Socket(); CacheChannel channel = J2CacheTestChannel.open(config)) {
+            restoredSource.connect(source, 3000);
+            restoredSource.setSoTimeout(3000);
+            BufferedReader reply = new BufferedReader(
+                    new InputStreamReader(restoredSource.getInputStream(), StandardCharsets.US_ASCII));
+            assertEquals("STORED", authenticateMeta(restoredSource, reply));
             J2CacheMemcachedCredentialRetryStore store = store(channel, config, firstClient);
-            assertEquals(deadline, MemcachedLegacyWindow.read(source, REGION + ":" + principal, 3000).getDeadline());
-            assertTrue(store.migrateLegacyWindow(principal, source));
-            assertFalse(store.migrateLegacyWindow(principal, source));
-            assertTrue(store.migrateLegacyWindow(persistent, source));
-            assertFalse(store.migrateLegacyWindow(expiring, source));
+            assertThrows(CacheException.class, () -> store.migrateLegacyWindow(principal, source));
+            assertEquals(deadline, MemcachedLegacyWindow.read(restoredSource, REGION + ":" + principal).getDeadline());
+            assertTrue(store.migrateLegacyWindowFromMetaConnection(principal, restoredSource));
+            assertFalse(store.migrateLegacyWindowFromMetaConnection(principal, restoredSource));
+            assertTrue(store.migrateLegacyWindowFromMetaConnection(persistent, restoredSource));
+            assertFalse(store.migrateLegacyWindowFromMetaConnection(expiring, restoredSource));
             Attempt next = store.reserve(principal);
             assertEquals(4, next.getCount());
             String target = "shiro-retry:" + digest(namespace) + ":" + digest(principal);
@@ -266,7 +276,7 @@ public class J2CacheMemcachedCredentialRetryStoreIntegrationTest {
             assertEquals(1, persistentAttempt.getCount());
             String persistentKey = "shiro-retry:" + digest(namespace) + ":" + digest(persistent);
             assertEquals("0:1:" + persistentAttempt.getWindowId(), firstClient.get(persistentKey, new StringTranscoder()));
-            assertEquals(3, MemcachedLegacyWindow.read(source, REGION + ":" + principal, 3000).getCount());
+            assertEquals(3, MemcachedLegacyWindow.read(restoredSource, REGION + ":" + principal).getCount());
             assertStoredDeadlines(target, deadline, persistentKey);
         }
     }
@@ -292,15 +302,23 @@ public class J2CacheMemcachedCredentialRetryStoreIntegrationTest {
         }
     }
 
-    private static void awaitMetaListener(InetSocketAddress address) throws InterruptedException {
+    private static String authenticateMeta(Socket socket, BufferedReader response) throws IOException {
+        byte[] credentials = (FIXTURE_USER + " " + FIXTURE_PASSWORD).getBytes(StandardCharsets.US_ASCII);
+        OutputStream requests = socket.getOutputStream();
+        requests.write(("set auth 0 0 " + credentials.length + "\r\n").getBytes(StandardCharsets.US_ASCII));
+        requests.write(credentials);
+        requests.write("\r\n".getBytes(StandardCharsets.US_ASCII));
+        requests.flush();
+        return response.readLine();
+    }
+
+    private static void awaitAuthenticatedMetaListener(InetSocketAddress address) throws InterruptedException {
         for (int attempt = 0; attempt < 60; attempt++) {
             try (Socket socket = new Socket()) {
                 socket.connect(address, 250);
                 socket.setSoTimeout(250);
-                socket.getOutputStream().write("version\r\n".getBytes(StandardCharsets.US_ASCII));
                 BufferedReader reply = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.US_ASCII));
-                String version = reply.readLine();
-                if (Objects.nonNull(version) && version.startsWith("VERSION ")) {
+                if ("STORED".equals(authenticateMeta(socket, reply))) {
                     return;
                 }
             } catch (IOException ignored) {
@@ -308,7 +326,7 @@ public class J2CacheMemcachedCredentialRetryStoreIntegrationTest {
             }
             Thread.sleep(100);
         }
-        throw new AssertionError("Warm-restarted Memcached did not open its Meta Text listener");
+        throw new AssertionError("Warm-restarted Memcached did not open its authenticated Meta Text listener");
     }
 
     @Test
