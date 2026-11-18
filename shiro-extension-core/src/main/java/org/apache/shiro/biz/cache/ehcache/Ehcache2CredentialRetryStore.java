@@ -3,16 +3,19 @@ package org.apache.shiro.biz.cache.ehcache;
 import java.io.Serializable;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import net.sf.ehcache.Ehcache;
 import net.sf.ehcache.Element;
 import net.sf.ehcache.config.CacheConfiguration;
 import net.sf.ehcache.config.TerracottaConfiguration.Consistency;
 import org.apache.shiro.biz.authc.credential.CredentialRetryStore;
+import org.apache.shiro.cache.CacheException;
 
 /**
  * Credential retry state backed by Ehcache 2 key locks. Shared deployments require
  * a strongly consistent Terracotta region.
+ * An existing legacy retry region can be reused after its legacy clients stop.
  *
  * @param <K> serializable key used by the cache
  */
@@ -46,12 +49,21 @@ public final class Ehcache2CredentialRetryStore<K extends Serializable> implemen
                 return initial;
             }
 
-            Attempt current = (Attempt) entry.getObjectValue();
-            if (current.getCount() == Integer.MAX_VALUE) {
-                return current;
+            Object value = entry.getObjectValue();
+            Attempt next;
+            if (value instanceof AtomicInteger) {
+                int count = ((AtomicInteger) value).get();
+                if (count < 0) {
+                    throw new CacheException("Legacy credential retry count is negative");
+                }
+                next = new Attempt(UUID.randomUUID().toString(), count == Integer.MAX_VALUE ? count : count + 1);
+            } else {
+                Attempt current = (Attempt) value;
+                if (current.getCount() == Integer.MAX_VALUE) {
+                    return current;
+                }
+                next = new Attempt(current.getWindowId(), current.getCount() + 1);
             }
-
-            Attempt next = new Attempt(current.getWindowId(), current.getCount() + 1);
             // The replacement keeps the original TTL origin and counts this read as idle activity.
             cache.put(new Element(key, next, entry.getVersion(), entry.getCreationTime(),
                     entry.getLastAccessTime(), 0L, false, entry.getTimeToLive(), entry.getTimeToIdle(),
@@ -69,8 +81,11 @@ public final class Ehcache2CredentialRetryStore<K extends Serializable> implemen
         cache.acquireWriteLockOnKey(key);
         try {
             Element entry = cache.getQuiet(key);
-            if (Objects.nonNull(entry) && windowId.equals(((Attempt) entry.getObjectValue()).getWindowId())) {
-                cache.remove(key);
+            if (Objects.nonNull(entry)) {
+                Object value = entry.getObjectValue();
+                if (value instanceof Attempt && windowId.equals(((Attempt) value).getWindowId())) {
+                    cache.remove(key);
+                }
             }
         } finally {
             cache.releaseWriteLockOnKey(key);
