@@ -86,6 +86,25 @@ public final class RedisCredentialRetryStore implements CredentialRetryStore {
             end
             return '0'
             """;
+    private static final String IMPORT_LEGACY = """
+            local key = KEYS[1]
+            if redis.call('EXISTS', key) == 1 then
+              return '0'
+            end
+            if ARGV[3] ~= '0' then
+              redis.replicate_commands()
+              local time = redis.call('TIME')
+              local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+              if tonumber(ARGV[3]) <= now then
+                return '0'
+              end
+            end
+            redis.call('HSET', key, 'window', ARGV[1], 'count', ARGV[2])
+            if ARGV[3] ~= '0' then
+              redis.call('PEXPIREAT', key, ARGV[3])
+            end
+            return '1'
+            """;
 
     private final ScriptExecutor executor;
     private final String namespace;
@@ -193,6 +212,23 @@ public final class RedisCredentialRetryStore implements CredentialRetryStore {
     @Override
     public void clearIfCurrent(Object principal, String windowId) {
         executor.eval(CLEAR, List.of(key(principal)), List.of(windowId));
+    }
+
+    /**
+     * Imports a fixed-expiry counter into an empty destination key during an exclusive cutover.
+     * Run the import while legacy and destination clients are stopped.
+     *
+     * @param principal principal to migrate
+     * @param count persisted count before the next reservation
+     * @param deadlineMillis absolute Redis expiry in epoch milliseconds, or zero for a persistent key
+     * @return true when an unexpired counter was imported
+     */
+    public boolean importFixedWindow(Object principal, int count, long deadlineMillis) {
+        if (count < 0 || deadlineMillis < 0) {
+            throw new IllegalArgumentException("Legacy count and deadline must be nonnegative");
+        }
+        return "1".equals(executor.eval(IMPORT_LEGACY, List.of(key(principal)),
+                List.of(UUID.randomUUID().toString(), Integer.toString(count), Long.toString(deadlineMillis))));
     }
 
     private String key(Object principal) {
