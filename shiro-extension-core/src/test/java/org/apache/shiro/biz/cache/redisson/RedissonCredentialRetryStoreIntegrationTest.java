@@ -102,10 +102,15 @@ public class RedissonCredentialRetryStoreIntegrationTest {
         assertDifferentPrimaries(mapName, namespace + ":principal");
         RMapCache<String, AtomicInteger> source = firstClient.getMapCache(mapName,
                 new CompositeCodec(StringCodec.INSTANCE, new SerializationCodec(), new SerializationCodec()));
+        long beforeWrite = System.currentTimeMillis();
         source.put("principal", new AtomicInteger(3), 7000, TimeUnit.MILLISECONDS, 6000, TimeUnit.MILLISECONDS);
+        long afterWrite = System.currentTimeMillis();
         long ttl = sourceDeadline(mapName, "redisson__timeout__set");
         long idle = sourceDeadline(mapName, "redisson__idle__set");
-        assertEquals(1000L, ttl - idle);
+        // Redisson samples the clock separately for the two expiration policies.
+        assertTrue(ttl >= beforeWrite + 7000 && ttl <= afterWrite + 7000);
+        assertTrue(idle >= beforeWrite + 6000 && idle <= afterWrite + 6000);
+        assertTrue(idle < ttl);
         RedissonCredentialRetryStore store = store(secondClient, Duration.ofSeconds(30), Duration.ofSeconds(30));
         assertTrue(store.migrateLegacyWindow(source, "principal"));
         assertFalse(store.migrateLegacyWindow(source, "principal"));
