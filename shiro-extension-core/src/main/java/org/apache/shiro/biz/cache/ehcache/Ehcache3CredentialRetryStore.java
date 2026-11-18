@@ -23,16 +23,20 @@ public final class Ehcache3CredentialRetryStore<K> implements CredentialRetrySto
 
     private final Cache<K, Object> cache;
     private final Function<Object, K> principalKey;
+    private final boolean usesTypedCounters;
 
     /**
      * @param cache dedicated retry cache configured with {@link #fixedWindowExpiry(Duration)}
-     *              or Ehcache's eternal expiry
+     *              or Ehcache's eternal expiry. An AtomicInteger-typed region must
+     *              preserve the serializable counter subtype during storage.
      * @param principalKey consistent principal key encoding for all callers sharing the cache
      */
     @SuppressWarnings("unchecked")
     public Ehcache3CredentialRetryStore(Cache<K, ?> cache, Function<Object, K> principalKey) {
         Objects.requireNonNull(cache, "cache");
-        if (!cache.getRuntimeConfiguration().getValueType().isAssignableFrom(Attempt.class)) {
+        Class<?> valueType = cache.getRuntimeConfiguration().getValueType();
+        this.usesTypedCounters = AtomicInteger.class.equals(valueType);
+        if (!usesTypedCounters && !valueType.isAssignableFrom(Attempt.class)) {
             throw new IllegalArgumentException("Ehcache retry region must accept credential retry attempts");
         }
         this.cache = (Cache<K, Object>) cache;
@@ -65,24 +69,24 @@ public final class Ehcache3CredentialRetryStore<K> implements CredentialRetrySto
             Object value = cache.get(key);
             if (Objects.isNull(value)) {
                 Attempt initial = firstAttempt();
-                if (Objects.isNull(cache.putIfAbsent(key, initial))) {
+                if (Objects.isNull(cache.putIfAbsent(key, storeValue(initial)))) {
                     return initial;
                 }
-            } else if (value == MigratedCounter.ZERO) {
+            } else if (isMigratedZero(value)) {
                 Attempt initial = firstAttempt();
-                if (cache.replace(key, value, initial)) {
+                if (cache.replace(key, value, storeValue(initial))) {
                     return initial;
                 }
             } else {
-                if (value instanceof AtomicInteger) {
+                Attempt current = storedAttempt(value);
+                if (Objects.isNull(current)) {
                     throw new CacheException("Legacy Ehcache retry entry requires migration before reservation");
                 }
-                Attempt current = (Attempt) value;
                 if (current.getCount() == Integer.MAX_VALUE) {
                     return current;
                 }
                 Attempt next = new Attempt(current.getWindowId(), current.getCount() + 1);
-                if (cache.replace(key, current, next)) {
+                if (cache.replace(key, value, storeValue(next))) {
                     return next;
                 }
             }
@@ -96,7 +100,8 @@ public final class Ehcache3CredentialRetryStore<K> implements CredentialRetrySto
         Objects.requireNonNull(windowId, "windowId");
         for (int conflict = 0; conflict < MAX_CONFLICTS; conflict++) {
             Object value = cache.get(key);
-            if (!(value instanceof Attempt) || !windowId.equals(((Attempt) value).getWindowId()) || cache.remove(key, value)) {
+            Attempt current = storedAttempt(value);
+            if (Objects.isNull(current) || !windowId.equals(current.getWindowId()) || cache.remove(key, value)) {
                 return;
             }
         }
@@ -106,7 +111,8 @@ public final class Ehcache3CredentialRetryStore<K> implements CredentialRetrySto
     /**
      * Converts a persisted counter in place without restarting its expiry.
      * Pause all legacy and new retry clients, drain writes, and use a single migration writer.
-     * The existing region must accept both the legacy and new value formats.
+     * The existing region must retain the actual type of stored values when serializing them.
+     * A region typed as AtomicInteger stores the converted state in a serializable subtype.
      *
      * @param principal original principal in the Ehcache region
      * @return true when a live legacy counter was converted
@@ -114,17 +120,40 @@ public final class Ehcache3CredentialRetryStore<K> implements CredentialRetrySto
     public boolean migrateLegacyWindow(Object principal) {
         K key = key(principal);
         Object value = cache.get(key);
-        if (!(value instanceof AtomicInteger)) {
+        if (!(value instanceof AtomicInteger) || value instanceof TypedCounter) {
             return false;
         }
         int count = ((AtomicInteger) value).get();
         if (count < 0) {
             throw new CacheException("Legacy credential retry count is negative");
         }
-        Object migrated = count == 0 ? MigratedCounter.ZERO : new Attempt(UUID.randomUUID().toString(), count);
+        Object migrated = count == 0
+                ? (usesTypedCounters ? new TypedCounter(null, 0) : MigratedCounter.ZERO)
+                : storeValue(new Attempt(UUID.randomUUID().toString(), count));
         // Serialized AtomicInteger copies cannot be compared reliably. Under exclusive cutover,
         // replacing a live entry preserves the existing expiry through the validated policy.
         return Objects.nonNull(cache.replace(key, migrated));
+    }
+
+    private Object storeValue(Attempt attempt) {
+        return usesTypedCounters ? new TypedCounter(attempt.getWindowId(), attempt.getCount()) : attempt;
+    }
+
+    private static Attempt storedAttempt(Object value) {
+        if (value instanceof Attempt) {
+            return (Attempt) value;
+        }
+        if (value instanceof TypedCounter) {
+            TypedCounter counter = (TypedCounter) value;
+            if (counter.get() > 0) {
+                return new Attempt(counter.windowId, counter.get());
+            }
+        }
+        return null;
+    }
+
+    private static boolean isMigratedZero(Object value) {
+        return value == MigratedCounter.ZERO || (value instanceof TypedCounter && ((TypedCounter) value).get() == 0);
     }
 
     private static Attempt firstAttempt() {
@@ -137,6 +166,33 @@ public final class Ehcache3CredentialRetryStore<K> implements CredentialRetrySto
 
     private enum MigratedCounter {
         ZERO
+    }
+
+    private static final class TypedCounter extends AtomicInteger {
+
+        private static final long serialVersionUID = 1L;
+
+        private final String windowId;
+
+        private TypedCounter(String windowId, int count) {
+            super(count);
+            this.windowId = windowId;
+        }
+
+        // Conditional operations compare the value with a deserialized copy in off-heap regions.
+        @Override
+        public boolean equals(Object other) {
+            if (!(other instanceof TypedCounter)) {
+                return false;
+            }
+            TypedCounter counter = (TypedCounter) other;
+            return get() == counter.get() && Objects.equals(windowId, counter.windowId);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(windowId, get());
+        }
     }
 
     private static final class FixedWindowExpiry<V> implements ExpiryPolicy<Object, V> {
