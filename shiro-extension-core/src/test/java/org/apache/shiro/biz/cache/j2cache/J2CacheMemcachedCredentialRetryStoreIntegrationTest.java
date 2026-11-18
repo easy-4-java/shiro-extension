@@ -1,10 +1,12 @@
 package org.apache.shiro.biz.cache.j2cache;
 
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Instant;
@@ -33,6 +35,7 @@ import net.rubyeye.xmemcached.transcoders.SerializingTranscoder;
 import net.rubyeye.xmemcached.transcoders.StringTranscoder;
 import net.rubyeye.xmemcached.utils.AddrUtil;
 import org.apache.shiro.biz.authc.credential.CredentialRetryStore.Attempt;
+import org.apache.shiro.cache.CacheException;
 import org.apache.shiro.codec.Hex;
 import org.junit.After;
 import org.junit.Before;
@@ -41,6 +44,7 @@ import org.junit.Test;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeTrue;
@@ -189,6 +193,127 @@ public class J2CacheMemcachedCredentialRetryStoreIntegrationTest {
     }
 
     @Test
+    public void refusesToImportWhenOnlyTheBinaryProtocolCanReadTheCounter() throws Exception {
+        String binaryPort = System.getProperty("shiro.memcached.binary.test.port");
+        assumeTrue("Supply an isolated binary-only Memcached port", Objects.nonNull(binaryPort));
+        String binaryEndpoint = "127.0.0.1:" + binaryPort;
+        SerializationUtils.init("java", new Properties());
+        J2CacheConfig config = config(true, "30s");
+        String principal = "binary-cutover-" + UUID.randomUUID();
+        String legacyKey = REGION + ":" + principal;
+        String target = "shiro-retry:" + digest(namespace) + ":" + digest(principal);
+        SerializingTranscoder transcoder = new SerializingTranscoder();
+        byte[] counter = SerializationUtils.serialize(new AtomicInteger(3));
+        MemcachedClient legacy = client(binaryEndpoint);
+        try (CacheChannel channel = J2CacheTestChannel.open(config)) {
+            assertTrue(legacy.set(legacyKey, 120, counter, transcoder));
+            byte[] storedCounter = (byte[]) legacy.get(legacyKey, transcoder);
+            assertEquals(3, ((AtomicInteger) SerializationUtils.deserialize(storedCounter)).get());
+            long originalCas = legacy.gets(legacyKey, transcoder).getCas();
+
+            J2CacheMemcachedCredentialRetryStore store = store(channel, config, firstClient);
+            assertThrows(CacheException.class,
+                    () -> store.migrateLegacyWindow(principal, AddrUtil.getOneAddress(binaryEndpoint)));
+            assertNull(firstClient.get(target, new StringTranscoder()));
+            assertEquals(originalCas, legacy.gets(legacyKey, transcoder).getCas());
+        } finally {
+            legacy.shutdown();
+        }
+    }
+
+    @Test
+    public void importsLegacyWindowsAfterBinarySourceWarmRestart() throws Exception {
+        String sourcePort = System.getProperty("shiro.memcached.warm.test.port");
+        String container = System.getProperty("shiro.memcached.warm.test.container");
+        assumeTrue("Supply a dedicated warm-restart Memcached fixture",
+                Objects.nonNull(sourcePort) && Objects.nonNull(container));
+        InetSocketAddress source = AddrUtil.getOneAddress("127.0.0.1:" + sourcePort);
+        SerializationUtils.init("java", new Properties());
+        SerializingTranscoder transcoder = new SerializingTranscoder();
+        String principal = "warm-" + UUID.randomUUID();
+        String persistent = principal + "-persistent";
+        String expiring = principal + "-expiring";
+        int deadline = Math.toIntExact(Instant.now().getEpochSecond() + 60);
+        byte[] counter = SerializationUtils.serialize(new AtomicInteger(3));
+        byte[] zero = SerializationUtils.serialize(new AtomicInteger(0));
+        MemcachedClient legacy = client("127.0.0.1:" + sourcePort);
+        try {
+            assertTrue(legacy.set(REGION + ":" + principal, deadline, counter, transcoder));
+            assertTrue(legacy.set(REGION + ":" + persistent, 0, zero, transcoder));
+            assertTrue(legacy.set(REGION + ":" + expiring, 1, counter, transcoder));
+        } finally {
+            legacy.shutdown();
+        }
+        Process stop = new ProcessBuilder("docker", "exec", container, "sh", "-ec",
+                "kill -USR1 \"$(cat /state/source.pid)\"").inheritIO().start();
+        assertTrue("Graceful stop command timed out", stop.waitFor(10, TimeUnit.SECONDS));
+        assertEquals("Graceful stop command failed", 0, stop.exitValue());
+        awaitMetaListener(source);
+
+        J2CacheConfig config = config(true, "30s");
+        try (CacheChannel channel = J2CacheTestChannel.open(config)) {
+            J2CacheMemcachedCredentialRetryStore store = store(channel, config, firstClient);
+            assertEquals(deadline, MemcachedLegacyWindow.read(source, REGION + ":" + principal, 3000).getDeadline());
+            assertTrue(store.migrateLegacyWindow(principal, source));
+            assertFalse(store.migrateLegacyWindow(principal, source));
+            assertTrue(store.migrateLegacyWindow(persistent, source));
+            assertFalse(store.migrateLegacyWindow(expiring, source));
+            Attempt next = store.reserve(principal);
+            assertEquals(4, next.getCount());
+            String target = "shiro-retry:" + digest(namespace) + ":" + digest(principal);
+            assertEquals(deadline + ":4:" + next.getWindowId(), firstClient.get(target, new StringTranscoder()));
+            Attempt persistentAttempt = store.reserve(persistent);
+            assertEquals(1, persistentAttempt.getCount());
+            String persistentKey = "shiro-retry:" + digest(namespace) + ":" + digest(persistent);
+            assertEquals("0:1:" + persistentAttempt.getWindowId(), firstClient.get(persistentKey, new StringTranscoder()));
+            assertEquals(3, MemcachedLegacyWindow.read(source, REGION + ":" + principal, 3000).getCount());
+            assertStoredDeadlines(target, deadline, persistentKey);
+        }
+    }
+
+    private void assertStoredDeadlines(String target, int deadline, String persistentKey) throws IOException {
+        try (Socket socket = new Socket()) {
+            socket.connect(AddrUtil.getOneAddress(endpoint), 3000);
+            socket.setSoTimeout(3000);
+            socket.getOutputStream().write("lru_crawler metadump hash\r\n".getBytes(StandardCharsets.US_ASCII));
+            BufferedReader reply = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.US_ASCII));
+            Set<String> keysAtExpectedExpiry = new HashSet<>();
+            String line;
+            while (Objects.nonNull(line = reply.readLine()) && !"END".equals(line)) {
+                String entry = URLDecoder.decode(line, StandardCharsets.UTF_8.name());
+                if (entry.startsWith("key=" + target + " exp=" + deadline + " ")) {
+                    keysAtExpectedExpiry.add(target);
+                }
+                if (entry.startsWith("key=" + persistentKey + " exp=-1 ")) {
+                    keysAtExpectedExpiry.add(persistentKey);
+                }
+            }
+            assertEquals(2, keysAtExpectedExpiry.size());
+            assertTrue(keysAtExpectedExpiry.contains(target));
+            assertTrue(keysAtExpectedExpiry.contains(persistentKey));
+        }
+    }
+
+    private static void awaitMetaListener(InetSocketAddress address) throws InterruptedException {
+        for (int attempt = 0; attempt < 60; attempt++) {
+            try (Socket socket = new Socket()) {
+                socket.connect(address, 250);
+                socket.setSoTimeout(250);
+                socket.getOutputStream().write("version\r\n".getBytes(StandardCharsets.US_ASCII));
+                BufferedReader reply = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.US_ASCII));
+                String version = reply.readLine();
+                if (Objects.nonNull(version) && version.startsWith("VERSION ")) {
+                    return;
+                }
+            } catch (IOException ignored) {
+                // Connections can fail while the Memcached process restarts.
+            }
+            Thread.sleep(100);
+        }
+        throw new AssertionError("Warm-restarted Memcached did not open its Meta Text listener");
+    }
+
+    @Test
     public void keepsTheOriginalRegionDeadlineAfterAnUpdate() throws Exception {
         J2CacheConfig config = config(true, "4s");
         try (CacheChannel first = J2CacheTestChannel.open(config); CacheChannel second = J2CacheTestChannel.open(config)) {
@@ -254,7 +379,11 @@ public class J2CacheMemcachedCredentialRetryStoreIntegrationTest {
     }
 
     private MemcachedClient client() throws Exception {
-        XMemcachedClientBuilder builder = new XMemcachedClientBuilder(AddrUtil.getAddresses(endpoint));
+        return client(endpoint);
+    }
+
+    private MemcachedClient client(String server) throws Exception {
+        XMemcachedClientBuilder builder = new XMemcachedClientBuilder(AddrUtil.getAddresses(server));
         builder.setCommandFactory(new BinaryCommandFactory());
         return builder.build();
     }
