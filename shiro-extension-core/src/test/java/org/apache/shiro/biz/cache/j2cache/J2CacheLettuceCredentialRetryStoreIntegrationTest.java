@@ -4,18 +4,23 @@ import io.lettuce.core.RedisClient;
 import io.lettuce.core.ScriptOutputType;
 import io.lettuce.core.api.StatefulRedisConnection;
 import java.util.Objects;
+import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import net.oschina.j2cache.CacheChannel;
 import net.oschina.j2cache.J2CacheConfig;
+import net.oschina.j2cache.Level2Cache;
+import net.oschina.j2cache.util.SerializationUtils;
 import org.apache.shiro.biz.authc.credential.CredentialRetryStore.Attempt;
 import org.junit.Before;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeTrue;
@@ -31,6 +36,38 @@ public class J2CacheLettuceCredentialRetryStoreIntegrationTest {
         String configured = System.getProperty("shiro.redis.test.port");
         assumeTrue("Supply an isolated Redis port", Objects.nonNull(configured));
         port = Integer.parseInt(configured);
+    }
+
+    @Test
+    public void migratesBothL2LayoutsUsingPersistedCountsAndDeadlines() throws Exception {
+        SerializationUtils.init("java", new Properties());
+        RedisClient client = client();
+        try (StatefulRedisConnection<String, String> redis = client.connect()) {
+            for (String storage : new String[] {"generic", "hash"}) {
+                J2CacheConfig config = config(true, storage);
+                try (CacheChannel channel = J2CacheTestChannel.open(config)) {
+                    channel.set(REGION, "principal", new AtomicInteger(1));
+                    Level2Cache source = (Level2Cache) channel.getL2Provider().buildCache(REGION, null);
+                    source.put("principal", new AtomicInteger(3), 8L);
+                    assertEquals(1, ((AtomicInteger) channel.get(REGION, "principal").getValue()).get());
+                    String legacyKey = namespace + ":legacy:" + REGION + ("hash".equals(storage) ? "" : ":principal");
+                    long deadline = redis.sync().eval("return redis.call('PEXPIRETIME', KEYS[1])",
+                            ScriptOutputType.INTEGER, legacyKey);
+                    J2CacheLettuceCredentialRetryStore store = store(channel, config, redis);
+                    assertTrue(store.migrateLegacyWindow("principal"));
+                    assertFalse(store.migrateLegacyWindow("principal"));
+                    assertFalse(store.migrateLegacyWindow("missing"));
+                    assertEquals(deadline, expiry(redis));
+                    Attempt next = store.reserve("principal");
+                    assertEquals(4, next.getCount());
+                    assertEquals(deadline, expiry(redis));
+                    assertEquals(3, ((AtomicInteger) source.get("principal")).get());
+                    store.clearIfCurrent("principal", next.getWindowId());
+                }
+            }
+        } finally {
+            client.shutdown();
+        }
     }
 
     @Test

@@ -23,6 +23,7 @@ import redis.clients.jedis.ShardedJedis;
 public final class J2CacheRedisCredentialRetryStore implements CredentialRetryStore {
 
     private final RedisCredentialRetryStore delegate;
+    private final J2CacheRedisLegacyWindows legacy;
 
     /**
      * @param channel channel using the writable Jedis provider
@@ -38,9 +39,10 @@ public final class J2CacheRedisCredentialRetryStore implements CredentialRetrySt
             throw new IllegalArgumentException("J2Cache Cluster mode requires its native JedisCluster script client");
         }
         RedisClient client = provider.getRedisClient();
-        this.delegate = new RedisCredentialRetryStore(
-                (script, keys, args) -> eval(client, script, keys, args),
+        RedisCredentialRetryStore.ScriptExecutor scripts = (script, keys, args) -> eval(client, script, keys, args);
+        this.delegate = new RedisCredentialRetryStore(scripts,
                 namespace, principalKey, J2CacheRetryExpiry.resolve(channel, config, region, "generic"));
+        this.legacy = new J2CacheRedisLegacyWindows(channel, config, region, true, scripts);
     }
 
     /**
@@ -56,9 +58,10 @@ public final class J2CacheRedisCredentialRetryStore implements CredentialRetrySt
                                            JedisCluster cluster) {
         writableProvider(channel);
         Objects.requireNonNull(cluster, "cluster");
-        this.delegate = new RedisCredentialRetryStore(
-                (script, keys, args) -> (String) cluster.eval(script, keys, args),
+        RedisCredentialRetryStore.ScriptExecutor scripts = (script, keys, args) -> (String) cluster.eval(script, keys, args);
+        this.delegate = new RedisCredentialRetryStore(scripts,
                 namespace, principalKey, J2CacheRetryExpiry.resolve(channel, config, region, "generic"));
+        this.legacy = new J2CacheRedisLegacyWindows(channel, config, region, true, scripts);
     }
 
     @Override
@@ -69,6 +72,16 @@ public final class J2CacheRedisCredentialRetryStore implements CredentialRetrySt
     @Override
     public void clearIfCurrent(Object principal, String windowId) {
         delegate.clearIfCurrent(principal, windowId);
+    }
+
+    /**
+     * Copies a persisted L2 counter into the dedicated retry namespace during an exclusive cutover.
+     *
+     * @param principal original string principal key in the J2Cache retry region
+     * @return true when a live legacy window was imported into an empty destination
+     */
+    public boolean migrateLegacyWindow(String principal) {
+        return legacy.migrate(principal, delegate);
     }
 
     private static RedisCacheProvider writableProvider(CacheChannel channel) {
