@@ -39,7 +39,9 @@ public class J2CacheRedisClusterMigrationTest {
     @Test
     public void jedisMigratesGenericAndHashCountersAcrossPrimaries() throws Exception {
         String nodes = nodes();
-        Set<HostAndPort> addresses = Arrays.stream(nodes.split(",")).map(HostAndPort::parseString)
+        // Jedis 2.9's parseString rewrites loopback to the machine's primary address.
+        Set<HostAndPort> addresses = redisUris(nodes).stream()
+                .map(uri -> new HostAndPort(uri.getHost(), uri.getPort()))
                 .collect(Collectors.toSet());
         try (JedisCluster jedis = new JedisCluster(addresses)) {
             verifyLayouts(nodes, "redis", (channel, config, namespace, commands) -> {
@@ -61,9 +63,7 @@ public class J2CacheRedisClusterMigrationTest {
 
     private void verifyLayouts(String nodes, String provider, StoreFactory factory) throws Exception {
         SerializationUtils.init("java", new Properties());
-        List<RedisURI> uris = Arrays.stream(nodes.split(",")).map(node -> RedisURI.create("redis://" + node))
-                .collect(Collectors.toList());
-        RedisClusterClient client = RedisClusterClient.create(uris);
+        RedisClusterClient client = RedisClusterClient.create(redisUris(nodes));
         try (var connection = client.connect()) {
             var commands = connection.sync();
             for (String storage : new String[] {"generic", "hash"}) {
@@ -102,6 +102,11 @@ public class J2CacheRedisClusterMigrationTest {
         } finally {
             client.shutdown();
         }
+    }
+
+    private static List<RedisURI> redisUris(String nodes) {
+        return Arrays.stream(nodes.split(",")).map(node -> RedisURI.create("redis://" + node))
+                .collect(Collectors.toList());
     }
 
     private static long deadline(RedisAdvancedClusterCommands<String, String> commands, String key) {
