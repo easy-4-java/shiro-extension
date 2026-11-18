@@ -10,7 +10,7 @@ name: CI
 
 on:
   push:
-    branches: [feature/2.0.x]
+    branches: [feature/2.0.x, feature/REQ-20261118-wandl-shiro-auth-2x]
   pull_request:
     branches: [feature/2.0.x]
   workflow_dispatch:
@@ -23,6 +23,20 @@ jobs:
     name: JDK 17 Build & Verify
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      redis:
+        image: redis:8.4.0
+        ports:
+          - 6379/tcp
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+      memcached:
+        image: memcached:1.6.45-alpine
+        ports:
+          - 11211/tcp
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
@@ -34,40 +48,91 @@ jobs:
           java-version: '17'
           cache: maven
 
-      - name: Install Easy4J snapshot dependencies
-        env:
-          EASY4J_BRANCH: ${{ github.base_ref || github.ref_name }}
-          EASY4J_DEPENDENCIES: "jwt-issuer"
-        run: |
-          set -euo pipefail
-          dependency_root="${RUNNER_TEMP}/easy4j-dependencies"
-          mkdir -p "${dependency_root}"
-          for dependency in ${EASY4J_DEPENDENCIES}; do
-            git clone --depth 1 --branch "${EASY4J_BRANCH}" \
-              "https://github.com/easy-4-java/${dependency}.git" \
-              "${dependency_root}/${dependency}"
-            for attempt in 1 2 3; do
-              if mvn -B --no-transfer-progress \
-                -f "${dependency_root}/${dependency}/pom.xml" \
-                -DskipTests -Djacoco.skip=true -Dgpg.skip=true install; then
-                break
-              fi
-              if [[ "${attempt}" -eq 3 ]]; then
-                exit 1
-              fi
-              sleep "$((attempt * 10))"
-            done
-          done
+      - name: Checkout pinned JWT issuer source
+        uses: actions/checkout@v7
+        with:
+          repository: easy-4-java/jwt-issuer
+          ref: 67490d6b54a7addb8ff6dc99f8f3602dfb1f1c9e
+          path: .ci-dependencies/jwt-issuer
+
+      - name: Install JWT issuer
+        run: >
+          sh ./mvnw -B -ntp -s .github/maven-central-settings.xml
+          -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2"
+          -f .ci-dependencies/jwt-issuer/pom.xml
+          -DskipTests -Djacoco.skip=true -Dgpg.skip=true install
 
       - name: Build and verify with JaCoCo coverage gate
-        run: mvn -B --no-transfer-progress clean verify
+        env:
+          RETRY_REDIS_CONTAINER: ${{ job.services.redis.id }}
+          RETRY_REDIS_PORT: ${{ job.services.redis.ports['6379'] }}
+          RETRY_MEMCACHED_PORT: ${{ job.services.memcached.ports['11211'] }}
+        run: >
+          sh ./mvnw -B -ntp -s .github/maven-central-settings.xml
+          -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2"
+          -Dshiro.redis.test.container="${RETRY_REDIS_CONTAINER}"
+          -Dshiro.redis.test.port="${RETRY_REDIS_PORT}"
+          -Dshiro.memcached.test.port="${RETRY_MEMCACHED_PORT}"
+          clean verify
+
+      - name: Verify J2Cache and Redisson retry migration on Redis Cluster
+        shell: bash
+        run: |
+          set -euo pipefail
+          containers=()
+          trap 'if (( ${#containers[@]} > 0 )); then docker rm -f "${containers[@]}" >/dev/null; fi' EXIT
+          nodes=()
+          for port in 16380 16381 16382; do
+            container=$(docker run -d --rm --network host redis:8.4.0 redis-server \
+              --bind 127.0.0.1 --port "$port" --cluster-enabled yes \
+              --cluster-announce-ip 127.0.0.1 --cluster-config-file nodes.conf \
+              --save '' --appendonly no)
+            containers+=("$container")
+            nodes+=("127.0.0.1:$port")
+            for attempt in {1..60}; do
+              if docker exec "$container" redis-cli -p "$port" ping | grep -qx PONG; then
+                break
+              fi
+              if (( attempt == 60 )); then
+                docker logs "$container"
+                exit 1
+              fi
+              sleep 0.25
+            done
+          done
+          timeout 30s docker exec "${containers[0]}" redis-cli --cluster create "${nodes[@]}" --cluster-replicas 0 --cluster-yes
+          cluster_nodes=$(IFS=,; printf '%s' "${nodes[*]}")
+          sh ./mvnw -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" \
+            -pl shiro-extension-core -Dshiro.redis.test.cluster.nodes="$cluster_nodes" \
+            '-Dtest=J2CacheRedisClusterMigrationTest,RedissonCredentialRetryStoreIntegrationTest#migratesTheLegacyMapEntryWithoutRefreshingItsIdleDeadline+keepsMapExpiryAndImportsPersistentZeroCounts' test
+          sh ./mvnw -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" \
+            -pl shiro-extension-core -Dshiro.redis.test.cluster.nodes="$cluster_nodes" \
+            -Dshiro.test.fileEncoding=ISO-8859-1 -Dshiro.redis.test.expectedCharset=ISO-8859-1 \
+            -Dsurefire.reportNameSuffix=latin1 -Dtest=J2CacheRedisClusterMigrationTest test
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          report = Path("shiro-extension-core/target/surefire-reports")
+          for name in ("J2CacheRedisClusterMigrationTest", "J2CacheRedisClusterMigrationTest-latin1", "RedissonCredentialRetryStoreIntegrationTest"):
+              suite = ElementTree.parse(next(report.glob(f"TEST-*{name}.xml"))).getroot()
+              if tuple(suite.get(key) for key in ("tests", "failures", "errors", "skipped")) != ("2", "0", "0", "0"):
+                  raise SystemExit(f"Expected two Redis Cluster migration tests without skips in {name}")
+          PYTHON
+
+      - name: Require coverage for modules with tests
+        run: |
+          for module in shiro-extension-core shiro-extension-spring shiro-extension-hazelcast3; do
+            test -s "${module}/target/jacoco.exec"
+            test -s "${module}/target/site/jacoco/jacoco.xml"
+          done
 
       - name: Upload JaCoCo coverage report
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: jacoco-coverage
-          path: target/site/jacoco
+          path: "**/target/site/jacoco"
           retention-days: 14
 
       - name: Upload surefire reports
@@ -75,5 +140,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: surefire-reports
-          path: target/surefire-reports
+          path: "**/target/surefire-reports"
           retention-days: 14
