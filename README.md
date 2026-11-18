@@ -200,6 +200,8 @@ For a Spring-managed retry matcher with cache name `login`, declare a provider-b
 
 For an existing Ehcache 2 retry cache, stop all legacy clients of that region before enabling the shared store. Reuse the same region and principal keys. The first reservation upgrades the stored legacy counter under the key lock, counts the current attempt and keeps the original TTL deadline and the configured time-to-idle policy. Use a strongly consistent region when clustered.
 
+For Hazelcast 5.2+ and 3.12, use the same cutover steps for the dedicated retry IMap. Deploy the retry-store module to every member and reuse the original map and principal keys. The first reservation converts the legacy counter atomically, retaining its remaining TTL and refreshing idle time under the existing policy. For the 3.12 adapter, supply the map's configured max idle explicitly.
+
 ## 8. Core Usage / API
 
 Selected public API (all classes under `org.apache.shiro.biz`):

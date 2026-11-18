@@ -7,6 +7,7 @@ import com.hazelcast.map.IMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import org.apache.shiro.biz.authc.credential.CredentialRetryStore;
 import org.apache.shiro.cache.CacheException;
@@ -21,15 +22,18 @@ public final class HazelcastCredentialRetryStore<K> implements CredentialRetrySt
 
     private static final int MAX_CONFLICTS = 128;
 
-    private final IMap<K, Attempt> map;
+    private final IMap<K, Object> map;
     private final Function<Object, K> principalKey;
 
     /**
-     * @param map dedicated retry map. Cluster members must have this module on their classpath.
+     * @param map dedicated retry map. Legacy retry maps can be reused after all legacy clients stop.
+     *            Cluster members must have this module on their classpath.
      * @param principalKey consistent principal key encoding for all callers sharing the map
      */
-    public HazelcastCredentialRetryStore(IMap<K, Attempt> map, Function<Object, K> principalKey) {
-        this.map = Objects.requireNonNull(map, "map");
+    @SuppressWarnings("unchecked")
+    public HazelcastCredentialRetryStore(IMap<K, ?> map, Function<Object, K> principalKey) {
+        // Hazelcast IMap has no runtime value type. The processor accepts both retry formats.
+        this.map = (IMap<K, Object>) Objects.requireNonNull(map, "map");
         this.principalKey = Objects.requireNonNull(principalKey, "principalKey");
     }
 
@@ -43,9 +47,13 @@ public final class HazelcastCredentialRetryStore<K> implements CredentialRetrySt
         K key = key(principal);
         Objects.requireNonNull(windowId, "windowId");
         for (int conflict = 0; conflict < MAX_CONFLICTS; conflict++) {
-            EntryView<K, Attempt> entry = map.getEntryView(key);
-            if (Objects.isNull(entry) || !windowId.equals(entry.getValue().getWindowId())
-                    || map.remove(key, entry.getValue())) {
+            EntryView<K, Object> entry = map.getEntryView(key);
+            if (Objects.isNull(entry)) {
+                return;
+            }
+            Object value = entry.getValue();
+            if (!(value instanceof Attempt) || !windowId.equals(((Attempt) value).getWindowId())
+                    || map.remove(key, value)) {
                 return;
             }
         }
@@ -56,7 +64,7 @@ public final class HazelcastCredentialRetryStore<K> implements CredentialRetrySt
         return Objects.requireNonNull(principalKey.apply(principal), "encoded principal");
     }
 
-    private static final class Reserve<K> implements EntryProcessor<K, Attempt, Attempt> {
+    private static final class Reserve<K> implements EntryProcessor<K, Object, Attempt> {
 
         private static final long serialVersionUID = 1L;
 
@@ -68,22 +76,30 @@ public final class HazelcastCredentialRetryStore<K> implements CredentialRetrySt
         }
 
         @Override
-        public Attempt process(Map.Entry<K, Attempt> entry) {
+        public Attempt process(Map.Entry<K, Object> entry) {
             updated = null;
-            Attempt current = entry.getValue();
-            if (Objects.isNull(current)) {
+            Object value = entry.getValue();
+            if (Objects.isNull(value)) {
                 updated = new Attempt(initialWindowId, 1);
-            } else if (current.getCount() == Integer.MAX_VALUE) {
-                return current;
+            } else if (value instanceof AtomicInteger) {
+                int count = ((AtomicInteger) value).get();
+                if (count < 0) {
+                    throw new CacheException("Legacy credential retry count is negative");
+                }
+                updated = new Attempt(initialWindowId, count == Integer.MAX_VALUE ? count : count + 1);
             } else {
+                Attempt current = (Attempt) value;
+                if (current.getCount() == Integer.MAX_VALUE) {
+                    return current;
+                }
                 updated = new Attempt(current.getWindowId(), current.getCount() + 1);
             }
-            ((ExtendedMapEntry<K, Attempt>) entry).setValueWithoutChangingExpiryTime(updated);
+            ((ExtendedMapEntry<K, Object>) entry).setValueWithoutChangingExpiryTime(updated);
             return updated;
         }
 
         @Override
-        public EntryProcessor<K, Attempt, Attempt> getBackupProcessor() {
+        public EntryProcessor<K, Object, Attempt> getBackupProcessor() {
             if (Objects.isNull(updated)) {
                 return null;
             }
@@ -92,7 +108,7 @@ public final class HazelcastCredentialRetryStore<K> implements CredentialRetrySt
         }
     }
 
-    private static final class CopyReservation<K> implements EntryProcessor<K, Attempt, Attempt> {
+    private static final class CopyReservation<K> implements EntryProcessor<K, Object, Attempt> {
 
         private static final long serialVersionUID = 1L;
 
@@ -103,8 +119,8 @@ public final class HazelcastCredentialRetryStore<K> implements CredentialRetrySt
         }
 
         @Override
-        public Attempt process(Map.Entry<K, Attempt> entry) {
-            ((ExtendedMapEntry<K, Attempt>) entry).setValueWithoutChangingExpiryTime(attempt);
+        public Attempt process(Map.Entry<K, Object> entry) {
+            ((ExtendedMapEntry<K, Object>) entry).setValueWithoutChangingExpiryTime(attempt);
             return attempt;
         }
     }

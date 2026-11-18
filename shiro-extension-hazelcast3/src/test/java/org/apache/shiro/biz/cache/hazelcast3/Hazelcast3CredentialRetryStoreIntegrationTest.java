@@ -23,6 +23,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.shiro.biz.authc.credential.CredentialRetryStore.Attempt;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
@@ -154,6 +155,36 @@ public class Hazelcast3CredentialRetryStoreIntegrationTest {
         Attempt renewed = idle.reserve("principal");
         assertEquals(1, renewed.getCount());
         assertNotEquals(first.getWindowId(), renewed.getWindowId());
+    }
+
+    @Test
+    public void migratesLegacyCounterAndKeepsItsProviderDeadline() throws Exception {
+        String principal = "legacy";
+        IMap<String, Object> map = first.getMap("ttl");
+        map.set(principal, new AtomicInteger(2), 6, TimeUnit.SECONDS);
+        long created = map.getEntryView(principal).getCreationTime();
+        await(created + 1100L);
+        map.set(principal, new AtomicInteger(3), 6, TimeUnit.SECONDS);
+        assertTrue("fixture must have a later update timestamp", map.getEntryView(principal).getLastUpdateTime() > created);
+        long originalDeadline = map.getEntryView(principal).getExpirationTime();
+        Hazelcast3CredentialRetryStore<String> remoteStore = store(client, "ttl");
+        Hazelcast3CredentialRetryStore<String> memberStore = store(first, "ttl");
+
+        Attempt adopted = remoteStore.reserve(principal);
+        assertEquals(4, adopted.getCount());
+        assertEquals(originalDeadline, map.getEntryView(principal).getExpirationTime());
+        memberStore.clearIfCurrent(principal, "stale");
+        Attempt next = memberStore.reserve(principal);
+        assertEquals(5, next.getCount());
+        assertEquals(adopted.getWindowId(), next.getWindowId());
+        assertEquals(originalDeadline, map.getEntryView(principal).getExpirationTime());
+
+        String unconverted = "unconverted";
+        map.set(unconverted, new AtomicInteger(2), 6, TimeUnit.SECONDS);
+        long unconvertedDeadline = map.getEntryView(unconverted).getExpirationTime();
+        remoteStore.clearIfCurrent(unconverted, "stale");
+        assertEquals(unconvertedDeadline, map.getEntryView(unconverted).getExpirationTime());
+        assertEquals(2, ((AtomicInteger) map.getEntryView(unconverted).getValue()).get());
     }
 
     private static Hazelcast3CredentialRetryStore<String> store(HazelcastInstance instance, String mapName) {
