@@ -105,12 +105,16 @@ jobs:
           sh ./mvnw -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" \
             -pl shiro-extension-core -Dshiro.redis.test.cluster.nodes="$cluster_nodes" \
             '-Dtest=J2CacheRedisClusterMigrationTest,RedissonCredentialRetryStoreIntegrationTest#migratesTheLegacyMapEntryWithoutRefreshingItsIdleDeadline+keepsMapExpiryAndImportsPersistentZeroCounts' test
+          sh ./mvnw -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" \
+            -pl shiro-extension-core -Dshiro.redis.test.cluster.nodes="$cluster_nodes" \
+            -Dshiro.test.fileEncoding=ISO-8859-1 -Dshiro.redis.test.expectedCharset=ISO-8859-1 \
+            -Dsurefire.reportNameSuffix=latin1 -Dtest=J2CacheRedisClusterMigrationTest test
           python3 - <<'PYTHON'
           from pathlib import Path
           from xml.etree import ElementTree
 
           report = Path("shiro-extension-core/target/surefire-reports")
-          for name in ("J2CacheRedisClusterMigrationTest", "RedissonCredentialRetryStoreIntegrationTest"):
+          for name in ("J2CacheRedisClusterMigrationTest", "J2CacheRedisClusterMigrationTest-latin1", "RedissonCredentialRetryStoreIntegrationTest"):
               suite = ElementTree.parse(next(report.glob(f"TEST-*{name}.xml"))).getroot()
               if tuple(suite.get(key) for key in ("tests", "failures", "errors", "skipped")) != ("2", "0", "0", "0"):
                   raise SystemExit(f"Expected two Redis Cluster migration tests without skips in {name}")
