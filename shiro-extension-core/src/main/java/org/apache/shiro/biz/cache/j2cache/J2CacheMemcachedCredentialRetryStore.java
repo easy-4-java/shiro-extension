@@ -2,6 +2,7 @@ package org.apache.shiro.biz.cache.j2cache;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -132,15 +133,41 @@ public final class J2CacheMemcachedCredentialRetryStore implements CredentialRet
      * @return true when the counter was copied to an empty destination
      */
     public boolean migrateLegacyWindow(String principal, InetSocketAddress source) {
-        Objects.requireNonNull(principal, "principal");
         Objects.requireNonNull(source, "source");
+        int timeout = (int) Math.max(1, Math.min(client.getOpTimeout(), Integer.MAX_VALUE));
+        return migrateLegacyWindow(principal, key -> MemcachedLegacyWindow.read(source, key, timeout));
+    }
+
+    /**
+     * Copies a legacy counter through a dedicated, already authenticated Meta Text connection.
+     * The caller owns the socket and must close it after use, including after errors.
+     * Pause retry clients and drain outstanding writes before importing.
+     *
+     * @param principal original string principal in the J2Cache region
+     * @param source connected socket to the server owning the legacy key, with a read timeout
+     * @return true when the counter was copied to an empty destination
+     */
+    public boolean migrateLegacyWindowFromMetaConnection(String principal, Socket source) {
+        Objects.requireNonNull(source, "source");
+        if (!source.isConnected() || source.isClosed()) {
+            throw new IllegalArgumentException("The Memcached source connection must be open");
+        }
+        return migrateLegacyWindow(principal, key -> {
+            if (source.getSoTimeout() <= 0) {
+                throw new IllegalArgumentException("The Memcached source connection requires a read timeout");
+            }
+            return MemcachedLegacyWindow.read(source, key);
+        });
+    }
+
+    private boolean migrateLegacyWindow(String principal, LegacyRead source) {
+        Objects.requireNonNull(principal, "principal");
         try {
             String legacyKey = legacyRegion + ":" + principal;
             if (legacySanitizeKeys) {
                 legacyKey = URLEncoder.encode(legacyKey, StandardCharsets.UTF_8.name());
             }
-            int timeout = (int) Math.max(1, Math.min(client.getOpTimeout(), Integer.MAX_VALUE));
-            MemcachedLegacyWindow legacy = MemcachedLegacyWindow.read(source, legacyKey, timeout);
+            MemcachedLegacyWindow legacy = source.read(legacyKey);
             if (Objects.isNull(legacy) || (legacy.getDeadline() > 0 && legacy.getDeadline() <= Instant.now().getEpochSecond())) {
                 return false;
             }
@@ -152,6 +179,12 @@ public final class J2CacheMemcachedCredentialRetryStore implements CredentialRet
         } catch (IOException | TimeoutException | MemcachedException exception) {
             throw new CacheException("Failed to migrate a Memcached retry window", exception);
         }
+    }
+
+    @FunctionalInterface
+    private interface LegacyRead {
+
+        MemcachedLegacyWindow read(String key) throws IOException;
     }
 
     private Window newWindow() {
