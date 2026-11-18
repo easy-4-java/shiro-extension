@@ -206,6 +206,8 @@ For a JCache retry region that already accepts both value types (for example, wi
 
 For Spring Data Redis, pause all old and new retry clients and wait for outstanding cache writes to reach Redis before importing. Call the adapter’s `migrateLegacyWindow` for each known string principal with the original cache and the distinct destination namespace used by the new store. The import copies the saved count and absolute Redis expiry using the source cache’s key and value serializers. It leaves source entries intact and skips missing, expired, and occupied destinations. Reconcile the submitted principals before resuming clients and finish all imports during the same cutover. If the new policy uses time-to-idle, it applies on the next reservation.
 
+The J2Cache Jedis and Lettuce adapters also expose `migrateLegacyWindow` for each known string principal during an exclusive cutover. Import reads the saved L2 counter using the channel’s serializer, preserves the Redis deadline for generic keys or the hash region, and creates only absent destination windows. Keep the original provider configuration and use a distinct destination namespace. Non-UTF-8 Jedis hash region keys require a separate migration path.
+
 ## 8. Core Usage / API
 
 Selected public API (all classes under `org.apache.shiro.biz`):
