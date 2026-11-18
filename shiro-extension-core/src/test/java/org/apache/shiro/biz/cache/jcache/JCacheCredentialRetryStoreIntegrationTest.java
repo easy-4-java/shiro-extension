@@ -18,6 +18,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import javax.cache.Cache;
 import javax.cache.CacheManager;
 import javax.cache.configuration.Factory;
@@ -125,6 +126,39 @@ public class JCacheCredentialRetryStoreIntegrationTest {
         assertEquals(2, first.reserve("alice").getCount());
         second.clearIfCurrent("alice", renewed.getWindowId());
         assertNull(cache.get("alice"));
+    }
+
+    @Test
+    public void migratesStoredLegacyCounterAcrossMembersWithoutRestartingExpiry() throws Exception {
+        String region = "legacy-expiration";
+        Cache<Object, Object> cache = firstManager.createCache(region, new MutableConfiguration<Object, Object>()
+                .setTypes(Object.class, Object.class)
+                .setExpiryPolicyFactory(CreatedExpiryPolicy.factoryOf(new Duration(TimeUnit.SECONDS, 3)))
+                .setStoreByValue(true));
+        cache.put("alice", new AtomicInteger(3));
+        long start = System.nanoTime();
+        JCacheCredentialRetryStore first = new JCacheCredentialRetryStore(firstManager.getCache(region));
+        JCacheCredentialRetryStore second = new JCacheCredentialRetryStore(secondManager.getCache(region));
+
+        first.clearIfCurrent("alice", "stale");
+        assertEquals(3, ((AtomicInteger) cache.get("alice")).get());
+        awaitElapsed(start, 1400);
+        Attempt adopted = second.reserve("alice");
+        assertEquals(4, adopted.getCount());
+        Attempt next = first.reserve("alice");
+        assertEquals(5, next.getCount());
+        assertEquals(adopted.getWindowId(), next.getWindowId());
+        awaitElapsed(start, 3300);
+        assertNull(cache.get("alice"));
+    }
+
+    @Test
+    public void rejectsTypedLegacyRegionBeforeItsFirstReservation() {
+        Cache<Object, AtomicInteger> cache = firstManager.createCache("legacy-only",
+                new MutableConfiguration<Object, AtomicInteger>()
+                        .setTypes(Object.class, AtomicInteger.class)
+                        .setExpiryPolicyFactory(EternalExpiryPolicy.factoryOf()));
+        assertThrows(IllegalArgumentException.class, () -> new JCacheCredentialRetryStore(cache));
     }
 
     @Test
