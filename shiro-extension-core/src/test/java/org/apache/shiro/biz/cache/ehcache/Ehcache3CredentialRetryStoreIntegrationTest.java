@@ -243,6 +243,46 @@ public class Ehcache3CredentialRetryStoreIntegrationTest {
         }
     }
 
+    @Test
+    public void drainsFiniteRenewingLegacyWindowsBeforeStartingTheNewRegion() {
+        AtomicLong time = new AtomicLong(10_000);
+        Duration window = Duration.ofSeconds(5);
+        try (CacheManager manager = manager(time, Ehcache3CredentialRetryStore.fixedWindowExpiry(window))) {
+            Cache<String, AtomicInteger> ttl = manager.createCache("legacy-ttl",
+                    CacheConfigurationBuilder.newCacheConfigurationBuilder(String.class, AtomicInteger.class,
+                            ResourcePoolsBuilder.newResourcePoolsBuilder().offheap(2, MemoryUnit.MB))
+                            .withExpiry(ExpiryPolicyBuilder.timeToLiveExpiration(window)));
+            Cache<String, AtomicInteger> idle = manager.createCache("legacy-idle",
+                    CacheConfigurationBuilder.newCacheConfigurationBuilder(String.class, AtomicInteger.class,
+                            ResourcePoolsBuilder.newResourcePoolsBuilder().offheap(2, MemoryUnit.MB))
+                            .withExpiry(ExpiryPolicyBuilder.timeToIdleExpiration(window)));
+            ttl.put("alice", new AtomicInteger(2));
+            idle.put("alice", new AtomicInteger(4));
+
+            time.set(12_000);
+            ttl.put("alice", new AtomicInteger(3));
+            assertEquals(4, idle.get("alice").get());
+
+            time.set(15_001);
+            assertEquals(3, ttl.get("alice").get());
+            assertEquals(4, idle.get("alice").get());
+
+            // The last idle read and the last TTL write are now both behind the drain bound.
+            time.set(20_002);
+            assertNull(ttl.get("alice"));
+            assertNull(idle.get("alice"));
+
+            Cache<String, Attempt> destination = manager.getCache("retry", String.class, Attempt.class);
+            Ehcache3CredentialRetryStore<String> store = new Ehcache3CredentialRetryStore<>(
+                    destination, Object::toString);
+            assertEquals(1, store.reserve("alice").getCount());
+            time.set(25_001);
+            assertEquals(2, store.reserve("alice").getCount());
+            time.set(25_003);
+            assertNull(destination.get("alice"));
+        }
+    }
+
     private static CacheManager manager(AtomicLong time, ExpiryPolicy<? super String, ? super Attempt> policy) {
         return CacheManagerBuilder.newCacheManagerBuilder()
                 .using(new TimeSourceConfiguration(time::get))
