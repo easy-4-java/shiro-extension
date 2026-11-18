@@ -212,6 +212,8 @@ The J2Cache Jedis and Lettuce adapters also expose `migrateLegacyWindow` for eac
 
 The J2Cache Memcached adapter can import a known principal during the same exclusive cutover. Pass the source server that owns the legacy key and accepts unauthenticated Memcached Meta Text on a trusted connection. The adapter reads the value and its remaining TTL together, determines the absolute deadline at server-second precision, retains the original entry, and creates the destination only if it is absent. Select source servers using the original key routing. Binary-only or authenticated source servers require a separate migration path.
 
+For a retry cache stored in a Redisson 3.12.5 `RMapCache`, pass the original cache and principal to `migrateLegacyWindow` during the same exclusive cutover. The adapter copies the count, entry lifetime, idle policy and current idle deadline without refreshing the source. It also honors a shorter map-wide expiry. Use a distinct destination namespace on the same Redis deployment.
+
 ## 8. Core Usage / API
 
 Selected public API (all classes under `org.apache.shiro.biz`):
