@@ -3,6 +3,7 @@ package org.apache.shiro.biz.cache.ehcache;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import org.apache.shiro.biz.authc.credential.CredentialRetryStore;
@@ -20,7 +21,7 @@ public final class Ehcache3CredentialRetryStore<K> implements CredentialRetrySto
 
     private static final int MAX_CONFLICTS = 128;
 
-    private final Cache<K, Attempt> cache;
+    private final Cache<K, Object> cache;
     private final Function<Object, K> principalKey;
 
     /**
@@ -28,10 +29,15 @@ public final class Ehcache3CredentialRetryStore<K> implements CredentialRetrySto
      *              or Ehcache's eternal expiry
      * @param principalKey consistent principal key encoding for all callers sharing the cache
      */
-    public Ehcache3CredentialRetryStore(Cache<K, Attempt> cache, Function<Object, K> principalKey) {
-        this.cache = Objects.requireNonNull(cache, "cache");
+    @SuppressWarnings("unchecked")
+    public Ehcache3CredentialRetryStore(Cache<K, ?> cache, Function<Object, K> principalKey) {
+        Objects.requireNonNull(cache, "cache");
+        if (!cache.getRuntimeConfiguration().getValueType().isAssignableFrom(Attempt.class)) {
+            throw new IllegalArgumentException("Ehcache retry region must accept credential retry attempts");
+        }
+        this.cache = (Cache<K, Object>) cache;
         this.principalKey = Objects.requireNonNull(principalKey, "principalKey");
-        ExpiryPolicy<? super K, ? super Attempt> expiry = cache.getRuntimeConfiguration().getExpiryPolicy();
+        ExpiryPolicy<?, ?> expiry = cache.getRuntimeConfiguration().getExpiryPolicy();
         if (!(expiry instanceof FixedWindowExpiry) && !ExpiryPolicy.NO_EXPIRY.equals(expiry)) {
             throw new IllegalArgumentException("Retry cache must preserve its creation expiry");
         }
@@ -41,27 +47,37 @@ public final class Ehcache3CredentialRetryStore<K> implements CredentialRetrySto
      * Returns an expiry policy for a dedicated retry cache.
      *
      * @param window configured duration for a newly created retry window
+     * @param <V> value type of the retry region
      * @return policy that retains the first deadline on reads and updates
      */
-    public static ExpiryPolicy<Object, Attempt> fixedWindowExpiry(Duration window) {
+    public static <V> ExpiryPolicy<Object, V> fixedWindowExpiry(Duration window) {
         Objects.requireNonNull(window, "window");
         if (window.isZero() || window.isNegative()) {
             throw new IllegalArgumentException("Retry window must be positive");
         }
-        return new FixedWindowExpiry(window);
+        return new FixedWindowExpiry<>(window);
     }
 
     @Override
     public Attempt reserve(Object principal) {
         K key = key(principal);
         for (int conflict = 0; conflict < MAX_CONFLICTS; conflict++) {
-            Attempt current = cache.get(key);
-            if (Objects.isNull(current)) {
-                Attempt initial = new Attempt(UUID.randomUUID().toString(), 1);
+            Object value = cache.get(key);
+            if (Objects.isNull(value)) {
+                Attempt initial = firstAttempt();
                 if (Objects.isNull(cache.putIfAbsent(key, initial))) {
                     return initial;
                 }
+            } else if (value == MigratedCounter.ZERO) {
+                Attempt initial = firstAttempt();
+                if (cache.replace(key, value, initial)) {
+                    return initial;
+                }
             } else {
+                if (value instanceof AtomicInteger) {
+                    throw new CacheException("Legacy Ehcache retry entry requires migration before reservation");
+                }
+                Attempt current = (Attempt) value;
                 if (current.getCount() == Integer.MAX_VALUE) {
                     return current;
                 }
@@ -79,19 +95,51 @@ public final class Ehcache3CredentialRetryStore<K> implements CredentialRetrySto
         K key = key(principal);
         Objects.requireNonNull(windowId, "windowId");
         for (int conflict = 0; conflict < MAX_CONFLICTS; conflict++) {
-            Attempt current = cache.get(key);
-            if (Objects.isNull(current) || !windowId.equals(current.getWindowId()) || cache.remove(key, current)) {
+            Object value = cache.get(key);
+            if (!(value instanceof Attempt) || !windowId.equals(((Attempt) value).getWindowId()) || cache.remove(key, value)) {
                 return;
             }
         }
         throw new CacheException("Unable to clear credential retry state within the conflict limit");
     }
 
+    /**
+     * Converts a persisted counter in place without restarting its expiry.
+     * Pause all legacy and new retry clients, drain writes, and use a single migration writer.
+     * The existing region must accept both the legacy and new value formats.
+     *
+     * @param principal original principal in the Ehcache region
+     * @return true when a live legacy counter was converted
+     */
+    public boolean migrateLegacyWindow(Object principal) {
+        K key = key(principal);
+        Object value = cache.get(key);
+        if (!(value instanceof AtomicInteger)) {
+            return false;
+        }
+        int count = ((AtomicInteger) value).get();
+        if (count < 0) {
+            throw new CacheException("Legacy credential retry count is negative");
+        }
+        Object migrated = count == 0 ? MigratedCounter.ZERO : new Attempt(UUID.randomUUID().toString(), count);
+        // Serialized AtomicInteger copies cannot be compared reliably. Under exclusive cutover,
+        // replacing a live entry preserves the existing expiry through the validated policy.
+        return Objects.nonNull(cache.replace(key, migrated));
+    }
+
+    private static Attempt firstAttempt() {
+        return new Attempt(UUID.randomUUID().toString(), 1);
+    }
+
     private K key(Object principal) {
         return Objects.requireNonNull(principalKey.apply(principal), "encoded principal");
     }
 
-    private static final class FixedWindowExpiry implements ExpiryPolicy<Object, Attempt> {
+    private enum MigratedCounter {
+        ZERO
+    }
+
+    private static final class FixedWindowExpiry<V> implements ExpiryPolicy<Object, V> {
 
         private final Duration window;
 
@@ -100,17 +148,17 @@ public final class Ehcache3CredentialRetryStore<K> implements CredentialRetrySto
         }
 
         @Override
-        public Duration getExpiryForCreation(Object key, Attempt value) {
+        public Duration getExpiryForCreation(Object key, V value) {
             return window;
         }
 
         @Override
-        public Duration getExpiryForAccess(Object key, Supplier<? extends Attempt> value) {
+        public Duration getExpiryForAccess(Object key, Supplier<? extends V> value) {
             return null;
         }
 
         @Override
-        public Duration getExpiryForUpdate(Object key, Supplier<? extends Attempt> previous, Attempt next) {
+        public Duration getExpiryForUpdate(Object key, Supplier<? extends V> previous, V next) {
             return null;
         }
     }
