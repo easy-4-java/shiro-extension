@@ -153,6 +153,26 @@ public class JCacheCredentialRetryStoreIntegrationTest {
     }
 
     @Test
+    public void legacyReaderCannotReuseARegionAfterAnotherMemberConvertsItsFirstEntry() {
+        String region = "legacy-rollback";
+        Cache<Object, Object> cache = firstManager.createCache(region, new MutableConfiguration<Object, Object>()
+                .setTypes(Object.class, Object.class)
+                .setExpiryPolicyFactory(EternalExpiryPolicy.factoryOf())
+                .setStoreByValue(true));
+        cache.put("alice", new AtomicInteger(3));
+        cache.put("bob", new AtomicInteger(2));
+        Cache<Object, Object> secondCache = secondManager.getCache(region);
+        assertEquals(3, ((AtomicInteger) secondCache.get("alice")).get());
+
+        JCacheCredentialRetryStore store = new JCacheCredentialRetryStore(secondCache);
+        assertEquals(4, store.reserve("alice").getCount());
+
+        assertThrows(ClassCastException.class, () -> ((AtomicInteger) cache.get("alice")).get());
+        assertEquals(2, ((AtomicInteger) cache.get("bob")).get());
+        assertEquals(4, ((Attempt) cache.get("alice")).getCount());
+    }
+
+    @Test
     public void rejectsTypedLegacyRegionBeforeItsFirstReservation() {
         Cache<Object, AtomicInteger> cache = firstManager.createCache("legacy-only",
                 new MutableConfiguration<Object, AtomicInteger>()
