@@ -3,7 +3,10 @@ package org.apache.shiro.biz.cache.j2cache;
 import io.lettuce.core.RedisURI;
 import io.lettuce.core.ScriptOutputType;
 import io.lettuce.core.cluster.RedisClusterClient;
+import io.lettuce.core.codec.ByteArrayCodec;
 import io.lettuce.core.cluster.api.sync.RedisAdvancedClusterCommands;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
@@ -44,7 +47,7 @@ public class J2CacheRedisClusterMigrationTest {
                 .map(uri -> new HostAndPort(uri.getHost(), uri.getPort()))
                 .collect(Collectors.toSet());
         try (JedisCluster jedis = new JedisCluster(addresses)) {
-            verifyLayouts(nodes, "redis", (channel, config, namespace, commands) -> {
+            verifyLayouts(nodes, "redis", (channel, config, namespace, commands, sourceCommands) -> {
                 var store = new J2CacheRedisCredentialRetryStore(
                         channel, config, REGION, namespace, Object::toString, jedis);
                 return new Migration(store, store::migrateLegacyWindow);
@@ -54,9 +57,9 @@ public class J2CacheRedisClusterMigrationTest {
 
     @Test
     public void lettuceMigratesGenericAndHashCountersAcrossPrimaries() throws Exception {
-        verifyLayouts(nodes(), "lettuce", (channel, config, namespace, commands) -> {
+        verifyLayouts(nodes(), "lettuce", (channel, config, namespace, commands, sourceCommands) -> {
             var store = new J2CacheLettuceCredentialRetryStore(
-                    channel, config, REGION, namespace, Object::toString, commands);
+                    channel, config, REGION, namespace, Object::toString, commands, sourceCommands);
             return new Migration(store, store::migrateLegacyWindow);
         });
     }
@@ -64,16 +67,20 @@ public class J2CacheRedisClusterMigrationTest {
     private void verifyLayouts(String nodes, String provider, StoreFactory factory) throws Exception {
         SerializationUtils.init("java", new Properties());
         RedisClusterClient client = RedisClusterClient.create(redisUris(nodes));
-        try (var connection = client.connect()) {
+        try (var connection = client.connect();
+             var sourceConnection = client.connect(ByteArrayCodec.INSTANCE)) {
             var commands = connection.sync();
             for (String storage : new String[] {"generic", "hash"}) {
                 String id = UUID.randomUUID().toString();
                 String namespace = DESTINATION + id;
-                String sourceNamespace = LEGACY + id;
+                String sourceNamespace = LEGACY + "l\u00e9gacy:" + id;
                 String sourceKey = sourceNamespace + ":" + REGION
                         + ("hash".equals(storage) ? "" : ":" + PRINCIPAL);
+                Charset encoding = "redis".equals(provider) && "generic".equals(storage)
+                        ? StandardCharsets.UTF_8 : Charset.defaultCharset();
+                byte[] sourceKeyBytes = sourceKey.getBytes(encoding);
                 String destinationKey = namespace + ":" + PRINCIPAL;
-                String sourceOwner = client.getPartitions().getPartitionBySlot(JedisClusterCRC16.getSlot(sourceKey))
+                String sourceOwner = client.getPartitions().getPartitionBySlot(JedisClusterCRC16.getSlot(sourceKeyBytes))
                         .getNodeId();
                 String destinationOwner =
                         client.getPartitions().getPartitionBySlot(JedisClusterCRC16.getSlot(destinationKey)).getNodeId();
@@ -86,17 +93,17 @@ public class J2CacheRedisClusterMigrationTest {
                     assertEquals(1, ((AtomicInteger) channel.get(REGION, PRINCIPAL).getValue()).get());
                     // Give both layouts a finite source deadline, including persistent hash regions.
                     assertTrue("Failed to set expiry on persisted " + storage + " key",
-                            commands.pexpire(sourceKey, 45_000L));
-                    long deadline = deadline(commands, sourceKey);
+                            sourceConnection.sync().pexpire(sourceKeyBytes, 45_000L));
+                    long deadline = deadline(sourceConnection.sync(), sourceKeyBytes);
                     assertTrue(deadline > System.currentTimeMillis());
-                    Migration migration = factory.open(channel, config, namespace, commands);
+                    Migration migration = factory.open(channel, config, namespace, commands, sourceConnection.sync());
                     assertTrue(migration.importWindow.test(PRINCIPAL));
                     assertFalse(migration.importWindow.test(PRINCIPAL));
                     assertEquals(deadline, deadline(commands, destinationKey));
                     assertEquals(4, migration.store.reserve(PRINCIPAL).getCount());
                     assertEquals(deadline, deadline(commands, destinationKey));
                     assertEquals(3, ((AtomicInteger) source.get(PRINCIPAL)).get());
-                    assertEquals(deadline, deadline(commands, sourceKey));
+                    assertEquals(deadline, deadline(sourceConnection.sync(), sourceKeyBytes));
                 }
             }
         } finally {
@@ -109,13 +116,17 @@ public class J2CacheRedisClusterMigrationTest {
                 .collect(Collectors.toList());
     }
 
-    private static long deadline(RedisAdvancedClusterCommands<String, String> commands, String key) {
+    private static <K, V> long deadline(RedisAdvancedClusterCommands<K, V> commands, K key) {
         return commands.eval("return redis.call('PEXPIRETIME', KEYS[1])", ScriptOutputType.INTEGER, key);
     }
 
     private static String nodes() {
         String nodes = System.getProperty("shiro.redis.test.cluster.nodes");
         assumeTrue("Supply an isolated Redis cluster", Objects.nonNull(nodes));
+        String expectedCharset = System.getProperty("shiro.redis.test.expectedCharset");
+        if (Objects.nonNull(expectedCharset)) {
+            assertEquals(Charset.forName(expectedCharset), Charset.defaultCharset());
+        }
         return nodes;
     }
 
@@ -137,7 +148,8 @@ public class J2CacheRedisClusterMigrationTest {
     @FunctionalInterface
     private interface StoreFactory {
         Migration open(CacheChannel channel, J2CacheConfig config, String namespace,
-                       RedisAdvancedClusterCommands<String, String> commands);
+                       RedisAdvancedClusterCommands<String, String> commands,
+                       RedisAdvancedClusterCommands<byte[], byte[]> sourceCommands);
     }
 
     private record Migration(CredentialRetryStore store,

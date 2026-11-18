@@ -192,7 +192,7 @@
                         <skipTests>false</skipTests>
                         <forkMode>once</forkMode>
                         <argLine>@{jacocoArgLine} -Xmx1024m
-							-Dfile.encoding=UTF-8</argLine>
+							-Dfile.encoding=${shiro.test.fileEncoding}</argLine>
                         <additionalClasspathElements>
                             <additionalClasspathElement>${basedir}/target/test-classes</additionalClasspathElement>
                         </additionalClasspathElements>
@@ -487,6 +487,7 @@
         <jacocoArgLine></jacocoArgLine>
         <revision>2.0.x.20260630-SNAPSHOT</revision>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <shiro.test.fileEncoding>UTF-8</shiro.test.fileEncoding>
         <caffeine.version>2.9.3</caffeine.version>
         <commons-codec.version>1.22.0</commons-codec.version>
         <commons-lang3.version>3.20.0</commons-lang3.version>
