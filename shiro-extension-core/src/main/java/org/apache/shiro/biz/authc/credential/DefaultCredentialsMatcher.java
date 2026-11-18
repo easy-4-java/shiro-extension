@@ -27,6 +27,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Arrays;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -47,8 +48,25 @@ public class DefaultCredentialsMatcher extends CodecSupport implements Credentia
 
 	protected CacheManager cacheManager;
 
+    private volatile CredentialRetryStore credentialRetryStore;
+
+    /**
+     * Configures atomic retry accounting for this matcher's retry cache namespace.
+     *
+     * @param store provider-backed store, or null to use the existing Shiro cache integration
+     */
+    public void setCredentialRetryStore(CredentialRetryStore store) {
+        this.credentialRetryStore = store;
+    }
+
 	@Override
 	public boolean doCredentialsMatch(AuthenticationToken token, AuthenticationInfo info) {
+        CredentialRetryStore store = credentialRetryStore;
+        if (Objects.nonNull(store)) {
+            return CredentialRetrySupport.match(store, token.getPrincipal(), getRetryLimit(),
+                    () -> credentialsMatch(token, info));
+        }
+
 		// check retry
 		checkCredentialsRetry(token);
 		// credentials match

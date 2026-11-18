@@ -106,6 +106,71 @@ public class CredentialsMatcherSafetyTest {
         assertEquals(1, cache.get("alice").get());
         assertEquals(1, cache.get("bob").get());
     }
+    @Test
+    public void configuredStoresShareLimitsAcrossMatcherInstancesAndResetOnSuccess() {
+        for (boolean hashed : new boolean[]{false, true}) {
+            TestRetryStore store = new TestRetryStore();
+            CredentialsMatcher first = matcher(hashed, store);
+            CredentialsMatcher second = matcher(hashed, store);
+
+            assertFalse(first.doCredentialsMatch(token("alice", "wrong"), account(hashed)));
+            assertFalse(second.doCredentialsMatch(token("alice", "wrong"), account(hashed)));
+            assertThrows(ExcessiveAttemptsException.class,
+                    () -> second.doCredentialsMatch(token("alice", "secret"), account(hashed)));
+            assertTrue(first.doCredentialsMatch(token("bob", "secret"), account(hashed)));
+            assertEquals(3, store.attempts.get("alice").getCount());
+            assertNull(store.attempts.get("bob"));
+        }
+    }
+
+    @Test
+    public void lateSuccessfulComparisonCannotClearARenewedWindow() {
+        TestRetryStore store = new TestRetryStore();
+        DefaultCredentialsMatcher matcher = new DefaultCredentialsMatcher() {
+            @Override
+            protected boolean credentialsMatch(AuthenticationToken token, AuthenticationInfo info) {
+                store.attempts.put(token.getPrincipal(), new CredentialRetryStore.Attempt("new-window", 1));
+                return true;
+            }
+        };
+        matcher.setCredentialRetryStore(store);
+
+        assertTrue(matcher.doCredentialsMatch(token("alice", "secret"), account(false)));
+        assertEquals("new-window", store.attempts.get("alice").getWindowId());
+        assertEquals(1, store.attempts.get("alice").getCount());
+    }
+
+    private static CredentialsMatcher matcher(boolean hashed, CredentialRetryStore store) {
+        if (hashed) {
+            CredentialsRetryLimitCredentialsMatcher matcher = new CredentialsRetryLimitCredentialsMatcher();
+            matcher.setHashAlgorithmName("SHA-256");
+            matcher.setCredentialsRetryTimesLimit(3);
+            matcher.setCredentialRetryStore(store);
+            return matcher;
+        }
+        DefaultCredentialsMatcher matcher = new DefaultCredentialsMatcher();
+        matcher.setRetryLimit(3);
+        matcher.setCredentialRetryStore(store);
+        return matcher;
+    }
+
+    private static final class TestRetryStore implements CredentialRetryStore {
+        private final Map<Object, Attempt> attempts = new ConcurrentHashMap<>();
+
+        @Override
+        public Attempt reserve(Object principal) {
+            return attempts.compute(principal, (key, previous) -> Objects.isNull(previous)
+                    ? new Attempt(UUID.randomUUID().toString(), 1)
+                    : new Attempt(previous.getWindowId(), previous.getCount() + 1));
+        }
+
+        @Override
+        public void clearIfCurrent(Object principal, String windowId) {
+            attempts.computeIfPresent(principal, (key, current) ->
+                    windowId.equals(current.getWindowId()) ? null : current);
+        }
+    }
+
     private static CredentialsMatcher matcher(boolean hashed, MapCache<Object, AtomicInteger> cache) {
         if (hashed) {
             CredentialsRetryLimitCredentialsMatcher matcher = new CredentialsRetryLimitCredentialsMatcher();
