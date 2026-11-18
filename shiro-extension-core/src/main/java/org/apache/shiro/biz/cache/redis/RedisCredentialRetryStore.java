@@ -57,6 +57,28 @@ public final class RedisCredentialRetryStore implements CredentialRetryStore {
             end
             return window .. ':' .. count
             """;
+    private static final String RESERVE_DYNAMIC = """
+            local key = KEYS[1]
+            local window = redis.call('HGET', key, 'window')
+            if not window then
+              if ARGV[2] == '' then
+                return ''
+              end
+              redis.call('HSET', key, 'window', ARGV[1], 'count', 1)
+              if ARGV[2] ~= '0' then
+                redis.call('PEXPIRE', key, ARGV[2])
+              end
+              return ARGV[1] .. ':1'
+            end
+            local count = redis.call('HGET', key, 'count')
+            if tonumber(count) < 2147483647 then
+              count = redis.call('HINCRBY', key, 'count', 1)
+            end
+            if ARGV[3] ~= '0' then
+              redis.call('PEXPIRE', key, ARGV[3])
+            end
+            return window .. ':' .. count
+            """;
     private static final String CLEAR = """
             if redis.call('HGET', KEYS[1], 'window') == ARGV[1] then
               redis.call('DEL', KEYS[1])
@@ -68,8 +90,7 @@ public final class RedisCredentialRetryStore implements CredentialRetryStore {
     private final ScriptExecutor executor;
     private final String namespace;
     private final Function<Object, String> principalKey;
-    private final String expiryMillis;
-    private final String idleMillis;
+    private final Reservation reservation;
 
     /**
      * @param executor Redis client operation for scripts returning a UTF-8 bulk string
@@ -91,20 +112,63 @@ public final class RedisCredentialRetryStore implements CredentialRetryStore {
      */
     public RedisCredentialRetryStore(ScriptExecutor executor, String namespace,
                                     Function<Object, String> principalKey, Duration expiry, Duration maxIdle) {
+        this(executor, namespace, principalKey, fixedReservation(expiry, maxIdle));
+    }
+
+    /**
+     * Uses the provider's creation and access expiry functions with an atomic Redis reservation.
+     *
+     * @param executor Redis client operation for scripts returning a UTF-8 bulk string
+     * @param namespace dedicated retry hash namespace shared by all instances
+     * @param principalKey stable principal encoding shared by all instances
+     * @param creationExpiry evaluated when a new retry window is needed. Zero creates a persistent window.
+     * @param accessExpiry evaluated for each reservation. Zero preserves the current expiry.
+     * @return a store using the supplied expiry functions
+     */
+    public static RedisCredentialRetryStore withDynamicExpiry(
+            ScriptExecutor executor, String namespace, Function<Object, String> principalKey,
+            Function<Object, Duration> creationExpiry, Function<Object, Duration> accessExpiry) {
+        Objects.requireNonNull(creationExpiry, "creationExpiry");
+        Objects.requireNonNull(accessExpiry, "accessExpiry");
+        return new RedisCredentialRetryStore(executor, namespace, principalKey, (scripts, keys, principal) -> {
+            String window = UUID.randomUUID().toString();
+            String accessMillis = dynamicMillis(accessExpiry.apply(principal));
+            String result = scripts.eval(RESERVE_DYNAMIC, keys, List.of(window, "", accessMillis));
+            if (result.isEmpty()) {
+                String creationMillis = dynamicMillis(creationExpiry.apply(principal));
+                return scripts.eval(RESERVE_DYNAMIC, keys, List.of(window, creationMillis, accessMillis));
+            }
+            return result;
+        });
+    }
+
+    private RedisCredentialRetryStore(ScriptExecutor executor, String namespace,
+                                      Function<Object, String> principalKey, Reservation reservation) {
         this.executor = Objects.requireNonNull(executor, "executor");
         this.namespace = Objects.requireNonNull(namespace, "namespace");
         this.principalKey = Objects.requireNonNull(principalKey, "principalKey");
+        this.reservation = reservation;
         if (namespace.isBlank()) {
             throw new IllegalArgumentException("Retry state requires a namespace");
         }
+    }
+
+    private static Reservation fixedReservation(Duration expiry, Duration maxIdle) {
         long ttl = toMillis(expiry, "expiry");
         long idle = toMillis(maxIdle, "maxIdle");
         // Allow room for the current epoch time while keeping Lua arithmetic exact.
         if (idle > 0 && (ttl > (1L << 52) || idle > (1L << 52))) {
             throw new IllegalArgumentException("Retry duration is too large for an idle expiry policy");
         }
-        this.expiryMillis = Long.toString(ttl);
-        this.idleMillis = Long.toString(idle);
+        String expiryMillis = Long.toString(ttl);
+        String idleMillis = Long.toString(idle);
+        return (scripts, keys, principal) -> scripts.eval(RESERVE, keys,
+                List.of(UUID.randomUUID().toString(), expiryMillis, idleMillis));
+    }
+
+    private static String dynamicMillis(Duration duration) {
+        Objects.requireNonNull(duration, "duration");
+        return Long.toString(duration.isNegative() ? 0 : duration.toMillis());
     }
 
     private static long toMillis(Duration duration, String name) {
@@ -118,8 +182,7 @@ public final class RedisCredentialRetryStore implements CredentialRetryStore {
 
     @Override
     public Attempt reserve(Object principal) {
-        String result = executor.eval(RESERVE, List.of(key(principal)),
-                List.of(UUID.randomUUID().toString(), expiryMillis, idleMillis));
+        String result = reservation.reserve(executor, List.of(key(principal)), principal);
         int separator = result.lastIndexOf(':');
         if (separator < 1) {
             throw new IllegalStateException("Unexpected Redis retry reservation response");
@@ -135,6 +198,12 @@ public final class RedisCredentialRetryStore implements CredentialRetryStore {
     private String key(Object principal) {
         String encoded = Objects.requireNonNull(principalKey.apply(principal), "encoded principal");
         return namespace + ":" + encoded;
+    }
+
+    @FunctionalInterface
+    private interface Reservation {
+
+        String reserve(ScriptExecutor executor, List<String> keys, Object principal);
     }
 
     /** Executes one script on the primary Redis node owning its key. */
