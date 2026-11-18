@@ -20,24 +20,28 @@ public final class JCacheCredentialRetryStore implements CredentialRetryStore {
 
     private final Cache<Object, Object> cache;
     private final boolean acceptsLegacyCounters;
+    private final boolean usesTypedCounters;
 
     /**
      * @param cache shared retry cache using store-by-value and a nonzero creation expiry
      *              or eternal expiry. Its expiry policy must leave the deadline unchanged
      *              on both access and update. All cluster members must have this module.
-     *              To migrate legacy counters, reuse a region that accepts both value
-     *              types after stopping all legacy clients.
+     *              To migrate legacy counters, stop legacy clients before reusing
+     *              the region. An AtomicInteger-typed region must preserve the
+     *              serializable counter subtype and its window ID.
      */
     @SuppressWarnings("unchecked")
     public JCacheCredentialRetryStore(Cache<Object, ?> cache) {
         CompleteConfiguration<?, ?> configuration =
                 Objects.requireNonNull(cache, "cache").getConfiguration(CompleteConfiguration.class);
-        if (!configuration.getValueType().isAssignableFrom(Attempt.class)) {
+        Class<?> valueType = configuration.getValueType();
+        this.usesTypedCounters = AtomicInteger.class.equals(valueType);
+        if (!usesTypedCounters && !valueType.isAssignableFrom(Attempt.class)) {
             throw new IllegalArgumentException("JCache retry region must accept credential retry attempts");
         }
         // Provider configuration validates the values that the entry processor writes.
         this.cache = (Cache<Object, Object>) cache;
-        this.acceptsLegacyCounters = configuration.getValueType().isAssignableFrom(AtomicInteger.class);
+        this.acceptsLegacyCounters = valueType.isAssignableFrom(AtomicInteger.class);
         ExpiryPolicy policy = configuration.getExpiryPolicyFactory().create();
         Duration creation = policy.getExpiryForCreation();
         if (!configuration.isStoreByValue() || Objects.isNull(creation) || creation.isZero()
@@ -48,7 +52,7 @@ public final class JCacheCredentialRetryStore implements CredentialRetryStore {
 
     @Override
     public Attempt reserve(Object principal) {
-        return cache.invoke(principal, Reserve.INSTANCE, UUID.randomUUID().toString());
+        return cache.invoke(principal, Reserve.INSTANCE, UUID.randomUUID().toString(), usesTypedCounters);
     }
 
     @Override
@@ -71,6 +75,27 @@ public final class JCacheCredentialRetryStore implements CredentialRetryStore {
         return cache.invoke(principal, RestoreLegacy.INSTANCE);
     }
 
+    private static Attempt storedAttempt(Object value) {
+        if (value instanceof Attempt) {
+            return (Attempt) value;
+        }
+        if (value instanceof TypedCounter) {
+            TypedCounter counter = (TypedCounter) value;
+            return new Attempt(counter.windowId, counter.get());
+        }
+        return null;
+    }
+
+    private static final class TypedCounter extends AtomicInteger {
+        private static final long serialVersionUID = 1L;
+        private final String windowId;
+
+        private TypedCounter(Attempt attempt) {
+            super(attempt.getCount());
+            this.windowId = attempt.getWindowId();
+        }
+    }
+
     private enum RestoreLegacy implements EntryProcessor<Object, Object, Boolean> {
         INSTANCE;
 
@@ -80,9 +105,9 @@ public final class JCacheCredentialRetryStore implements CredentialRetryStore {
             if (!entry.exists()) {
                 return false;
             }
-            Object value = entry.getValue();
-            if (value instanceof Attempt) {
-                entry.setValue(new AtomicInteger(((Attempt) value).getCount()));
+            Attempt current = storedAttempt(entry.getValue());
+            if (Objects.nonNull(current)) {
+                entry.setValue(new AtomicInteger(current.getCount()));
                 return true;
             }
             return false;
@@ -95,8 +120,14 @@ public final class JCacheCredentialRetryStore implements CredentialRetryStore {
         @Override
         public Attempt process(MutableEntry<Object, Object> entry, Object... arguments) {
             Object value = entry.getValue();
+            Attempt current = storedAttempt(value);
             Attempt next;
-            if (Objects.isNull(value)) {
+            if (Objects.nonNull(current)) {
+                if (current.getCount() == Integer.MAX_VALUE) {
+                    return current;
+                }
+                next = new Attempt(current.getWindowId(), current.getCount() + 1);
+            } else if (Objects.isNull(value)) {
                 next = new Attempt((String) arguments[0], 1);
             } else if (value instanceof AtomicInteger) {
                 int count = ((AtomicInteger) value).get();
@@ -105,13 +136,9 @@ public final class JCacheCredentialRetryStore implements CredentialRetryStore {
                 }
                 next = new Attempt((String) arguments[0], count == Integer.MAX_VALUE ? count : count + 1);
             } else {
-                Attempt current = (Attempt) value;
-                if (current.getCount() == Integer.MAX_VALUE) {
-                    return current;
-                }
-                next = new Attempt(current.getWindowId(), current.getCount() + 1);
+                throw new CacheException("JCache retry entry contains an unsupported value");
             }
-            entry.setValue(next);
+            entry.setValue(Boolean.TRUE.equals(arguments[1]) ? new TypedCounter(next) : next);
             return next;
         }
     }
@@ -121,8 +148,8 @@ public final class JCacheCredentialRetryStore implements CredentialRetryStore {
 
         @Override
         public Void process(MutableEntry<Object, Object> entry, Object... arguments) {
-            Object value = entry.getValue();
-            if (value instanceof Attempt && ((Attempt) value).getWindowId().equals(arguments[0])) {
+            Attempt current = storedAttempt(entry.getValue());
+            if (Objects.nonNull(current) && current.getWindowId().equals(arguments[0])) {
                 entry.remove();
             }
             return null;
