@@ -34,6 +34,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
@@ -170,6 +171,42 @@ public class JCacheCredentialRetryStoreIntegrationTest {
         assertThrows(ClassCastException.class, () -> ((AtomicInteger) cache.get("alice")).get());
         assertEquals(2, ((AtomicInteger) cache.get("bob")).get());
         assertEquals(4, ((Attempt) cache.get("alice")).getCount());
+    }
+
+    @Test
+    public void restoresLegacyCountsWithoutRenewingOrRecreatingEntries() throws Exception {
+        String region = "legacy-restore";
+        Cache<Object, Object> cache = firstManager.createCache(region, new MutableConfiguration<Object, Object>()
+                .setTypes(Object.class, Object.class)
+                .setExpiryPolicyFactory(CreatedExpiryPolicy.factoryOf(new Duration(TimeUnit.SECONDS, 4)))
+                .setStoreByValue(true));
+        cache.put("alice", new AtomicInteger(3));
+        long start = System.nanoTime();
+        cache.put("bob", new AtomicInteger(2));
+        JCacheCredentialRetryStore store = new JCacheCredentialRetryStore(secondManager.getCache(region));
+        assertEquals(4, store.reserve("alice").getCount());
+        awaitElapsed(start, 2000);
+
+        assertTrue(store.restoreLegacyWindow("alice"));
+        assertEquals(4, ((AtomicInteger) cache.get("alice")).get());
+        assertFalse(store.restoreLegacyWindow("alice"));
+        assertFalse(store.restoreLegacyWindow("bob"));
+        assertEquals(2, ((AtomicInteger) cache.get("bob")).get());
+        assertFalse(store.restoreLegacyWindow("absent"));
+        assertNull(cache.get("absent"));
+
+        awaitElapsed(start, 4400);
+        assertNull(cache.get("alice"));
+        assertFalse(store.restoreLegacyWindow("alice"));
+    }
+
+    @Test
+    public void rejectsLegacyRestoreInAnAttemptOnlyCache() {
+        Cache<Object, Attempt> cache = createCache("attempt-only-restore", EternalExpiryPolicy.factoryOf());
+        JCacheCredentialRetryStore store = new JCacheCredentialRetryStore(cache);
+        Attempt initial = store.reserve("alice");
+        assertThrows(IllegalStateException.class, () -> store.restoreLegacyWindow("alice"));
+        assertEquals(initial.getWindowId(), cache.get("alice").getWindowId());
     }
 
     @Test
