@@ -58,8 +58,8 @@ public class JCacheCredentialRetryStoreIntegrationTest {
         firstMember = Hazelcast.newHazelcastInstance(member(cluster, firstPort, secondPort));
         secondMember = Hazelcast.newHazelcastInstance(member(cluster, secondPort, firstPort));
         assertEquals(2, firstMember.getCluster().getMembers().size());
-        firstManager = HazelcastServerCachingProvider.createCachingProvider(firstMember).getCacheManager();
-        secondManager = HazelcastServerCachingProvider.createCachingProvider(secondMember).getCacheManager();
+        firstManager = new HazelcastServerCachingProvider(firstMember).getCacheManager();
+        secondManager = new HazelcastServerCachingProvider(secondMember).getCacheManager();
     }
 
     @AfterClass
@@ -148,7 +148,7 @@ public class JCacheCredentialRetryStoreIntegrationTest {
 
     private static Config member(String cluster, int ownPort, int otherPort) {
         Config configuration = new Config();
-        configuration.getGroupConfig().setName(cluster);
+        configuration.setClusterName(cluster);
         configuration.setProperty("hazelcast.logging.type", "none");
         configuration.setProperty("hazelcast.operation.thread.count", "2");
         configuration.setProperty("hazelcast.operation.generic.thread.count", "2");
@@ -159,6 +159,7 @@ public class JCacheCredentialRetryStoreIntegrationTest {
         NetworkConfig network = configuration.getNetworkConfig();
         network.setPort(ownPort).setPortAutoIncrement(false);
         network.getInterfaces().setEnabled(true).addInterface("127.0.0.1");
+        network.getJoin().getAutoDetectionConfig().setEnabled(false);
         network.getJoin().getMulticastConfig().setEnabled(false);
         network.getJoin().getTcpIpConfig().setEnabled(true).addMember("127.0.0.1:" + otherPort);
         return configuration;
