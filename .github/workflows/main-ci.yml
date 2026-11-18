@@ -50,6 +50,8 @@ jobs:
           test -s .ci-dependencies/jwt-issuer/jwt-issuer-with-jjwt/target/site/jacoco/jacoco.xml
           test -s shiro-extension-core/target/jacoco.exec
           test -s shiro-extension-core/target/site/jacoco/jacoco.xml
+          test -s shiro-extension-spring/target/jacoco.exec
+          test -s shiro-extension-spring/target/site/jacoco/jacoco.xml
       - uses: actions/upload-artifact@v7
         if: always()
         with:
