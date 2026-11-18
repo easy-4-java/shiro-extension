@@ -63,18 +63,23 @@ public final class J2CacheMemcachedCredentialRetryStore implements CredentialRet
             for (int conflict = 0; conflict < MAX_CONFLICTS; conflict++) {
                 GetsResponse<String> current = client.gets(key, STRINGS);
                 if (Objects.isNull(current)) {
-                    Window initial = new Window(new Attempt(UUID.randomUUID().toString(), 1), initialDeadline());
+                    Window initial = newWindow();
                     if (client.add(key, initial.expiresAt(), initial.encode(), STRINGS)) {
                         return initial.attempt();
                     }
                 } else {
                     Window window = Window.decode(current.getValue());
-                    Attempt attempt = window.attempt();
-                    if (attempt.getCount() == Integer.MAX_VALUE) {
-                        return attempt;
+                    Window next;
+                    if (window.expiresAt() > 0 && Instant.now().getEpochSecond() >= window.expiresAt()) {
+                        next = newWindow();
+                    } else {
+                        Attempt attempt = window.attempt();
+                        if (attempt.getCount() == Integer.MAX_VALUE) {
+                            return attempt;
+                        }
+                        next = new Window(new Attempt(attempt.getWindowId(), attempt.getCount() + 1),
+                                window.expiresAt());
                     }
-                    Window next = new Window(new Attempt(attempt.getWindowId(), attempt.getCount() + 1),
-                            window.expiresAt());
                     if (client.cas(key, next.expiresAt(), next.encode(), STRINGS, current.getCas())) {
                         return next.attempt();
                     }
@@ -111,6 +116,10 @@ public final class J2CacheMemcachedCredentialRetryStore implements CredentialRet
             throw new CacheException("Failed to clear a Memcached retry window", exception);
         }
         throw new CacheException("Unable to clear a Memcached retry window within the conflict limit");
+    }
+
+    private Window newWindow() {
+        return new Window(new Attempt(UUID.randomUUID().toString(), 1), initialDeadline());
     }
 
     private int initialDeadline() {

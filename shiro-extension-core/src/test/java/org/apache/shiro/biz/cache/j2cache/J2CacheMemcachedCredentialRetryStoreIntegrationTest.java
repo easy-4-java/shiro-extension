@@ -1,6 +1,10 @@
 package org.apache.shiro.biz.cache.j2cache;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
@@ -16,6 +20,7 @@ import net.oschina.j2cache.J2CacheConfig;
 import net.rubyeye.xmemcached.MemcachedClient;
 import net.rubyeye.xmemcached.XMemcachedClientBuilder;
 import net.rubyeye.xmemcached.command.BinaryCommandFactory;
+import net.rubyeye.xmemcached.transcoders.StringTranscoder;
 import net.rubyeye.xmemcached.utils.AddrUtil;
 import org.apache.shiro.biz.authc.credential.CredentialRetryStore.Attempt;
 import org.junit.After;
@@ -112,6 +117,28 @@ public class J2CacheMemcachedCredentialRetryStoreIntegrationTest {
             assertEquals(1, renewed.getCount());
             assertNotEquals(initial.getWindowId(), renewed.getWindowId());
         }
+    }
+
+    @Test
+    public void startsANewWindowIfMemcachedStillReturnsAnExpiredWindow() throws Exception {
+        J2CacheConfig config = config(true, "4s");
+        try (CacheChannel channel = J2CacheTestChannel.open(config)) {
+            var store = store(channel, config, firstClient);
+            String key = "shiro-retry:" + digest(namespace) + ":" + digest("principal");
+            long expiredAt = Instant.now().getEpochSecond() - 1;
+            assertTrue(firstClient.set(key, 20, expiredAt + ":8:old-window", new StringTranscoder()));
+
+            Attempt initial = store.reserve("principal");
+            assertEquals(1, initial.getCount());
+            assertNotEquals("old-window", initial.getWindowId());
+            store.clearIfCurrent("principal", "old-window");
+            assertEquals(2, store.reserve("principal").getCount());
+        }
+    }
+
+    private static String digest(String value) throws Exception {
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest(value.getBytes(StandardCharsets.UTF_8)));
     }
 
     @Test
