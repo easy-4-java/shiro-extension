@@ -49,12 +49,16 @@ jobs:
           auth_file=$(mktemp "${RUNNER_TEMP}/memcached-auth.XXXXXX")
           auth_container=
           binary_container=
+          warm_container=
           cleanup() {
             if [[ -n "$auth_container" ]]; then
               docker rm -f "$auth_container" >/dev/null
             fi
             if [[ -n "$binary_container" ]]; then
               docker rm -f "$binary_container" >/dev/null
+            fi
+            if [[ -n "$warm_container" ]]; then
+              docker rm -f "$warm_container" >/dev/null
             fi
             rm -f "$auth_file"
           }
@@ -67,6 +71,17 @@ jobs:
             memcached:1.6.45-alpine memcached -U 0 -Y /memcached-auth)
           binary_container=$(docker run -d --publish 127.0.0.1::11211/tcp \
             memcached:1.6.45-alpine memcached -U 0 -B binary)
+          warm_container=$(docker run -d --user 0 --publish 127.0.0.1::11211/tcp \
+            --tmpfs /state:rw,size=96m memcached:1.6.45-alpine sh -ec '
+              chown memcache /state
+              memcached -u memcache -U 0 -m 64 -B binary -e /state/memory &
+              child=$!
+              echo "$child" >/state/source.pid
+              wait "$child"
+              # The server requires the clock to advance beyond the saved stop second.
+              sleep 2
+              exec memcached -u memcache -U 0 -m 64 -B ascii -e /state/memory
+            ')
           ready_port() {
             local container=$1 binding port
             binding=$(docker port "$container" 11211/tcp)
@@ -84,10 +99,12 @@ jobs:
           }
           auth_port=$(ready_port "$auth_container")
           binary_port=$(ready_port "$binary_container")
+          warm_port=$(ready_port "$warm_container")
           mvn -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" \
             -Dshiro.redis.test.container="$RETRY_REDIS_CONTAINER" -Dshiro.redis.test.port="$RETRY_REDIS_PORT" \
             -Dshiro.memcached.test.port="$RETRY_MEMCACHED_PORT" -Dshiro.memcached.auth.test.port="$auth_port" \
-            -Dshiro.memcached.binary.test.port="$binary_port" clean verify
+            -Dshiro.memcached.binary.test.port="$binary_port" -Dshiro.memcached.warm.test.port="$warm_port" \
+            -Dshiro.memcached.warm.test.container="$warm_container" clean verify
           python3 - <<'PYTHON'
           from pathlib import Path
           from xml.etree import ElementTree
@@ -97,6 +114,7 @@ jobs:
           for name in (
               "importsThroughAnAuthenticatedMetaConnectionWithItsOriginalDeadline",
               "refusesToImportWhenOnlyTheBinaryProtocolCanReadTheCounter",
+              "importsLegacyWindowsAfterBinarySourceWarmRestart",
           ):
               case = suite.find(f'./testcase[@name="{name}"]')
               if case is None or any(case.find(status) is not None for status in ("failure", "error", "skipped")):
