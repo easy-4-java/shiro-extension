@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: easy-4-java/jwt-issuer
-          ref: 6b1a4de65a12a155e98e957ea82e446ef6420b36
+          ref: c6edbf6a56a0c8ae6409b9fc1b0ef9639c4063d1
           path: .ci-dependencies/jwt-issuer
       - name: Verify and install JWT issuer
         run: mvn -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" -f .ci-dependencies/jwt-issuer/pom.xml clean install
