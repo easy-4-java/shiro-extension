@@ -1,5 +1,8 @@
 package org.apache.shiro.biz.cache.j2cache;
 
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -31,6 +34,8 @@ public final class J2CacheMemcachedCredentialRetryStore implements CredentialRet
     private final String keyPrefix;
     private final Function<Object, String> principalKey;
     private final long regionExpiry;
+    private final String legacyRegion;
+    private final boolean legacySanitizeKeys;
 
     /**
      * @param channel channel using the xmemcached L2 provider
@@ -50,6 +55,8 @@ public final class J2CacheMemcachedCredentialRetryStore implements CredentialRet
         this.principalKey = Objects.requireNonNull(principalKey, "principalKey");
         this.keyPrefix = "shiro-retry:" + digest(Objects.requireNonNull(namespace, "namespace")) + ":";
         this.regionExpiry = J2CacheRetryExpiry.regionSeconds(channel, region);
+        this.legacyRegion = region;
+        this.legacySanitizeKeys = Boolean.parseBoolean(config.getL2CacheProperties().getProperty("sanitizeKeys"));
         if (regionExpiry < 0 || regionExpiry > Integer.MAX_VALUE
                 || (regionExpiry > MAX_RELATIVE_SECONDS && regionExpiry <= Instant.now().getEpochSecond())) {
             throw new IllegalArgumentException("The retry region has an invalid Memcached expiry");
@@ -73,12 +80,10 @@ public final class J2CacheMemcachedCredentialRetryStore implements CredentialRet
                     if (window.expiresAt() > 0 && Instant.now().getEpochSecond() >= window.expiresAt()) {
                         next = newWindow();
                     } else {
-                        Attempt attempt = window.attempt();
-                        if (attempt.getCount() == Integer.MAX_VALUE) {
-                            return attempt;
+                        if (window.count() == Integer.MAX_VALUE) {
+                            return window.attempt();
                         }
-                        next = new Window(new Attempt(attempt.getWindowId(), attempt.getCount() + 1),
-                                window.expiresAt());
+                        next = new Window(window.windowId(), window.count() + 1, window.expiresAt());
                     }
                     if (client.cas(key, next.expiresAt(), next.encode(), STRINGS, current.getCas())) {
                         return next.attempt();
@@ -101,7 +106,7 @@ public final class J2CacheMemcachedCredentialRetryStore implements CredentialRet
         try {
             for (int conflict = 0; conflict < MAX_CONFLICTS; conflict++) {
                 GetsResponse<String> current = client.gets(key, STRINGS);
-                if (Objects.isNull(current) || !windowId.equals(Window.decode(current.getValue()).attempt().getWindowId())) {
+                if (Objects.isNull(current) || !windowId.equals(Window.decode(current.getValue()).windowId())) {
                     return;
                 }
                 // A past absolute expiry makes the CAS remove only the version that was read.
@@ -118,8 +123,39 @@ public final class J2CacheMemcachedCredentialRetryStore implements CredentialRet
         throw new CacheException("Unable to clear a Memcached retry window within the conflict limit");
     }
 
+    /**
+     * Copies a legacy counter and its deadline during an exclusive cutover.
+     * Pause old and new clients and drain outstanding writes before importing.
+     *
+     * @param principal original string principal in the J2Cache region
+     * @param source server owning the legacy key, with the Memcached Meta Text protocol enabled
+     * @return true when the counter was copied to an empty destination
+     */
+    public boolean migrateLegacyWindow(String principal, InetSocketAddress source) {
+        Objects.requireNonNull(principal, "principal");
+        Objects.requireNonNull(source, "source");
+        try {
+            String legacyKey = legacyRegion + ":" + principal;
+            if (legacySanitizeKeys) {
+                legacyKey = URLEncoder.encode(legacyKey, StandardCharsets.UTF_8.name());
+            }
+            int timeout = (int) Math.max(1, Math.min(client.getOpTimeout(), Integer.MAX_VALUE));
+            MemcachedLegacyWindow legacy = MemcachedLegacyWindow.read(source, legacyKey, timeout);
+            if (Objects.isNull(legacy) || (legacy.getDeadline() > 0 && legacy.getDeadline() <= Instant.now().getEpochSecond())) {
+                return false;
+            }
+            Window window = new Window(UUID.randomUUID().toString(), legacy.getCount(), legacy.getDeadline());
+            return client.add(key(principal), window.expiresAt(), window.encode(), STRINGS);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new CacheException("Interrupted while migrating a Memcached retry window", exception);
+        } catch (IOException | TimeoutException | MemcachedException exception) {
+            throw new CacheException("Failed to migrate a Memcached retry window", exception);
+        }
+    }
+
     private Window newWindow() {
-        return new Window(new Attempt(UUID.randomUUID().toString(), 1), initialDeadline());
+        return new Window(UUID.randomUUID().toString(), 1, initialDeadline());
     }
 
     private int initialDeadline() {
@@ -147,10 +183,20 @@ public final class J2CacheMemcachedCredentialRetryStore implements CredentialRet
         }
     }
 
-    private record Window(Attempt attempt, int expiresAt) {
+    private record Window(String windowId, int count, int expiresAt) {
+
+        private Window {
+            if (count < 0 || expiresAt < 0) {
+                throw new CacheException("Invalid Memcached retry count or expiry");
+            }
+        }
+
+        private Attempt attempt() {
+            return new Attempt(windowId, count);
+        }
 
         private String encode() {
-            return expiresAt + ":" + attempt.getCount() + ":" + attempt.getWindowId();
+            return expiresAt + ":" + count + ":" + windowId;
         }
 
         private static Window decode(String encoded) {
@@ -158,7 +204,7 @@ public final class J2CacheMemcachedCredentialRetryStore implements CredentialRet
             if (fields.length != 3) {
                 throw new CacheException("Unexpected Memcached retry window format");
             }
-            return new Window(new Attempt(fields[2], Integer.parseInt(fields[1])), Integer.parseInt(fields[0]));
+            return new Window(fields[2], Integer.parseInt(fields[1]), Integer.parseInt(fields[0]));
         }
     }
 }

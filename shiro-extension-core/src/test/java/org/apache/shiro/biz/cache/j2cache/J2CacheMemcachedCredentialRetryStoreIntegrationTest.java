@@ -1,5 +1,6 @@
 package org.apache.shiro.biz.cache.j2cache;
 
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Instant;
@@ -8,6 +9,7 @@ import java.util.HexFormat;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Properties;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
@@ -15,8 +17,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import net.oschina.j2cache.CacheChannel;
 import net.oschina.j2cache.J2CacheConfig;
+import net.oschina.j2cache.Level2Cache;
+import net.oschina.j2cache.util.SerializationUtils;
 import net.rubyeye.xmemcached.MemcachedClient;
 import net.rubyeye.xmemcached.XMemcachedClientBuilder;
 import net.rubyeye.xmemcached.command.BinaryCommandFactory;
@@ -28,6 +33,7 @@ import org.junit.Before;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -98,6 +104,35 @@ public class J2CacheMemcachedCredentialRetryStoreIntegrationTest {
             } finally {
                 threads.shutdownNow();
             }
+        }
+    }
+
+    @Test
+    public void copiesTheLegacyCounterWithItsExactDeadlineAndPersistentZero() throws Exception {
+        SerializationUtils.init("java", new Properties());
+        J2CacheConfig config = config(true, "30s");
+        config.getL2CacheProperties().setProperty("sanitizeKeys", "true");
+        try (CacheChannel channel = J2CacheTestChannel.open(config)) {
+            Level2Cache source = (Level2Cache) channel.getL2Provider().buildCache(REGION, null);
+            String principal = "persisted principal";
+            int deadline = Math.toIntExact(Instant.now().getEpochSecond() + 15);
+            source.put(principal, new AtomicInteger(3), deadline);
+            source.put("persistent", new AtomicInteger(0), 0L);
+            InetSocketAddress address = AddrUtil.getOneAddress(endpoint);
+            J2CacheMemcachedCredentialRetryStore store = store(channel, config, firstClient);
+            assertTrue(store.migrateLegacyWindow(principal, address));
+            assertFalse(store.migrateLegacyWindow(principal, address));
+            assertFalse(store.migrateLegacyWindow("missing", address));
+            Attempt next = store.reserve(principal);
+            assertEquals(4, next.getCount());
+            String target = "shiro-retry:" + digest(namespace) + ":" + digest(principal);
+            assertEquals(deadline + ":4:" + next.getWindowId(), firstClient.get(target, new StringTranscoder()));
+            assertEquals(3, ((AtomicInteger) source.get(principal)).get());
+            assertTrue(store.migrateLegacyWindow("persistent", address));
+            Attempt persistent = store.reserve("persistent");
+            assertEquals(1, persistent.getCount());
+            String persistentKey = "shiro-retry:" + digest(namespace) + ":" + digest("persistent");
+            assertEquals("0:1:" + persistent.getWindowId(), firstClient.get(persistentKey, new StringTranscoder()));
         }
     }
 
