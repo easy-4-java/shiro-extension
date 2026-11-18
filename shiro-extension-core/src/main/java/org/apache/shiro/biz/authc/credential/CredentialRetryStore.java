@@ -2,6 +2,7 @@ package org.apache.shiro.biz.authc.credential;
 
 import java.io.Serializable;
 import java.util.Objects;
+import lombok.EqualsAndHashCode;
 import lombok.Getter;
 
 /**
@@ -30,6 +31,7 @@ public interface CredentialRetryStore {
 
     /** Data returned by a successful reservation. */
     @Getter
+    @EqualsAndHashCode
     final class Attempt implements Serializable {
 
         private static final long serialVersionUID = 1L;
