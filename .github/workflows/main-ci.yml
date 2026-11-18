@@ -38,7 +38,7 @@ jobs:
         env:
           RETRY_REDIS_CONTAINER: ${{ job.services.redis.id }}
           RETRY_REDIS_PORT: ${{ job.services.redis.ports[6379] }}
-        run: mvn -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" -Dshiro.redis.test.container="${RETRY_REDIS_CONTAINER}" -Dshiro.redisson.test.port="${RETRY_REDIS_PORT}" clean verify
+        run: mvn -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" -Dshiro.redis.test.container="${RETRY_REDIS_CONTAINER}" -Dshiro.redis.test.port="${RETRY_REDIS_PORT}" clean verify
       - name: Require coverage for modules with existing tests
         run: |
           test -s .ci-dependencies/jwt-issuer/jwt-issuer-with-jjwt/target/jacoco.exec

@@ -36,7 +36,7 @@ public class RedissonCredentialRetryStoreIntegrationTest {
 
     @BeforeClass
     public static void connectTwoClients() {
-        String port = System.getProperty("shiro.redisson.test.port");
+        String port = System.getProperty("shiro.redis.test.port");
         assumeTrue("Supply an isolated Redis port", Objects.nonNull(port));
         firstClient = client(port);
         secondClient = client(port);
