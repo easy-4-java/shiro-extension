@@ -198,6 +198,8 @@ Configure behavior through constructors and beans.
 
 For a Spring-managed retry matcher with cache name `login`, declare a provider-backed `CredentialRetryStore` bean named `shiro.credential-retry.login`. Spring Boot binds it to `DefaultCredentialsMatcher` and `CredentialsRetryLimitCredentialsMatcher`, including instances held by Spring-managed realms. An explicitly assigned store takes precedence. Matchers without a matching bean keep their Shiro cache configuration. Use the same provider, retry namespace and principal key mapping across the instances that share the window.
 
+For an existing Ehcache 2 retry cache, stop all legacy clients of that region before enabling the shared store. Reuse the same region and principal keys. The first reservation upgrades the stored legacy counter under the key lock, counts the current attempt and keeps the original TTL deadline and the configured time-to-idle policy. Use a strongly consistent region when clustered.
+
 ## 8. Core Usage / API
 
 Selected public API (all classes under `org.apache.shiro.biz`):
