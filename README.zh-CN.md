@@ -208,6 +208,8 @@ Hazelcast 5.2+ 与 3.12 的独立重试 IMap 沿用同样的切换顺序。所�
 
 J2Cache 的 Jedis 和 Lettuce 适配器也可在独占切换期间对已知字符串主体调用 `migrateLegacyWindow`。导入按原渠道的序列化方式读取 Redis 二级缓存计数，保留普通键或 Hash 区域的 Redis 截止时间，仅在目标窗口不存在时写入。沿用原缓存提供者配置，并指定独立的目标命名空间。非 UTF-8 的 Jedis Hash 区域键需要单独迁移。
 
+J2Cache Memcached 适配器也可在同一独占切换阶段导入已知主体。按原键路由传入保存旧值的源节点，该节点需允许在可信连接上使用无需认证的 Memcached Meta Text 协议。适配器同时读取旧值和剩余有效期，按服务端秒级精度确定绝对截止时间，保留原条目，仅在目标不存在时写入。仅支持二进制协议或需要认证的源节点需要独立迁移方式。
+
 ## 8. Core Usage / API
 
 精选公开 API（类均位于 `org.apache.shiro.biz` 包下）：

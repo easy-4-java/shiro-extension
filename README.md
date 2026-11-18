@@ -208,6 +208,8 @@ For Spring Data Redis, pause all old and new retry clients and wait for outstand
 
 The J2Cache Jedis and Lettuce adapters also expose `migrateLegacyWindow` for each known string principal during an exclusive cutover. Import reads the saved L2 counter using the channel’s serializer, preserves the Redis deadline for generic keys or the hash region, and creates only absent destination windows. Keep the original provider configuration and use a distinct destination namespace. Non-UTF-8 Jedis hash region keys require a separate migration path.
 
+The J2Cache Memcached adapter can import a known principal during the same exclusive cutover. Pass the source server that owns the legacy key and accepts unauthenticated Memcached Meta Text on a trusted connection. The adapter reads the value and its remaining TTL together, determines the absolute deadline at server-second precision, retains the original entry, and creates the destination only if it is absent. Select source servers using the original key routing. Binary-only or authenticated source servers require a separate migration path.
+
 ## 8. Core Usage / API
 
 Selected public API (all classes under `org.apache.shiro.biz`):
