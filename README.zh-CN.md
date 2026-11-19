@@ -184,7 +184,7 @@ realm.setCredentialsMatcher(new DefaultCredentialsMatcher());
 
 ## 7. Configuration
 
-这是库：没有配置属性与属性前缀。行为通过构造器/Bean 注入配置：
+通过构造器和 Bean 配置扩展行为。
 
 | 扩展点 | 配置方式 |
 | :--- | :--- |
@@ -193,6 +193,37 @@ realm.setCredentialsMatcher(new DefaultCredentialsMatcher());
 | Realm 缓存 | `setCacheManager(CaffeineCacheManager / GuavaCacheManager / SpringCacheManager / SessionCacheManager)` |
 | 过滤器（`HttpServletShiroFilter` 等） | Bean 属性与 Shiro 过滤器链定义 |
 | i18n 消息 | 随包 `org/apache/shiro/biz/messages*.properties`、`ShiroBizMessageSource` |
+
+### Spring Boot 共享重试计数
+
+如果匹配器的重试缓存名为 `login`，声明名为 `shiro.credential-retry.login` 的 `CredentialRetryStore` Bean。Spring Boot 会将它绑定到 `DefaultCredentialsMatcher` 和 `CredentialsRetryLimitCredentialsMatcher`，包括 Spring 管理的 Realm 内部创建的实例。手工指定的存储优先。缺少同名 Bean 时，匹配器沿用原 Shiro 缓存配置。共享重试窗口的应用实例应使用相同的缓存提供者、重试命名空间和主体键映射。
+
+对于现有 Ehcache 2 重试缓存，先停止访问该区域的全部旧版客户端，再启用共享重试存储，并沿用原区域及主体键。首次预留在键锁内转换已保存的旧计数，计入本次尝试，并保留原 TTL 截止时间和配置的空闲过期策略。集群部署使用强一致性区域。
+
+对于原生 Ehcache 3，暂停所有重试客户端并排空在途写入，每个区域只允许一个迁移写入方。使用原缓存对已知主体调用 `migrateLegacyWindow`。区域须使用仅在创建时设置的过期策略或永不过期策略。`Serializable` 等可接受旧计数和新窗口的区域直接保存新窗口。`AtomicInteger` 类型区域保存含窗口 ID 的可序列化子类型，要求序列化器保留该类型。活跃条目在原位置替换，保留原截止时间。
+
+旧区域的 TTL 或 TTI 若会因写入或访问续期，且能确认有限上界，可在维护窗口内排空切换。暂停所有可能访问旧重试区域的客户端和后台任务，等在途操作全部完成。从该时点起，至少等待所有来源区域配置中最长的一段有效期，并计入部署所需的时钟余量。等待结束后，在独立区域启用新存储并配置创建窗口。旧区域保持原状，已有计数按自身策略自然到期。该路径需要维护停顿，并确认新区域采用固定窗口。存在永不过期条目、无法证明上界的自定义策略，或必须继续保留续期行为时，需另选切换方式。
+
+回滚时保持客户端暂停并排空在途写入，再对已知主体调用 `restoreLegacyWindow`。缓存区域必须接受 `AtomicInteger`。活跃窗口恢复为普通旧版计数，保留当前次数和原截止时间。缺失、已过期或已经恢复的条目会跳过。
+
+Hazelcast 5.2+ 与 3.12 的独立重试 IMap 沿用同样的切换顺序。所有集群成员须部署重试存储模块，并沿用原 IMap 和主体键。首次预留会原子转换旧计数，保留剩余 TTL，并按原策略刷新空闲时间。使用 3.12 适配器时需传入 IMap 配置的最大空闲时长。
+
+对于现有 JCache 重试区域，停止旧客户端后沿用原区域和主体键。条目处理器会在同一次更新中转换计数并预留本次尝试。区域必须按值存储，并在访问和更新时保留原截止时间。值类型允许两种格式的区域（例如 `Object`）直接存储重试窗口。值类型为 `AtomicInteger` 的区域使用可序列化的计数器子类保存窗口标识。切换前验证提供方及其序列化配置能保留子类，并在所有执行节点部署此模块。该类型区域的迁移已在双节点 Hazelcast JCache 集群验证。回切时暂停所有重试客户端，等待在途写入完成，然后对原区域内每个已转换的主体调用 `restoreLegacyWindow`。该方法原地恢复普通 `AtomicInteger`，保留当前计数和原截止时间，跳过缺失、过期或已恢复条目。检查区域中是否仍有已转换条目，再恢复旧客户端。
+
+对于 Spring Data Redis，切换期间暂停所有旧版和新版重试客户端，等在途缓存写入全部到达 Redis 后再导入。用原缓存和新存储使用的独立目标命名空间，对每个已知的字符串主体调用适配器的 `migrateLegacyWindow`。导入沿用源缓存的键和值序列化配置，复制已保存的计数与 Redis 绝对截止时间。源数据保留，跳过缺失、已过期和目标已存在的窗口。恢复客户端之前先核对本次提交的全部主体，并在同一切换窗口完成导入。启用空闲续期时，从下一次预留起应用原策略。
+
+J2Cache 的 Jedis 和 Lettuce 适配器也可在独占切换期间对已知字符串主体调用 `migrateLegacyWindow`。导入按原渠道的序列化方式读取 Redis 二级缓存计数，保留普通键或 Hash 区域的 Redis 截止时间，仅在目标窗口不存在时写入。沿用原缓存提供者配置，并指定独立的目标命名空间。迁移按 JVM 默认字符集写入的旧键时，沿用原字符集。Jedis 按原二进制键查询截止时间。对于非 UTF-8 的 Lettuce 旧键，除 UTF-8 目标连接外，还需传入二进制脚本连接。
+
+J2Cache Memcached 适配器也可在同一独占切换阶段导入已知主体。按原键路由选择保存旧值的源节点。对允许 Meta Text 协议的可信源节点，可向 `migrateLegacyWindow` 传入地址。需要认证时，先认证专用 Meta Text 连接，设置有限的读取超时，再传给 `migrateLegacyWindowFromMetaConnection`。调用方负责认证、传输安全和关闭连接。连接上应没有在途命令，并由单个调用方顺序读取。适配器同时读取旧值和剩余有效期，按服务端秒级精度确定绝对截止时间，保留原条目，仅在目标不存在时写入。仅支持二进制协议的节点（包括要求二进制 SASL 的节点）仍需要独立迁移方式，因为其 GET 操作不返回原有效期。 如果能确认所有旧窗口的有效期上限，先暂停旧、新客户端并排空在途写入，等待所有源节点上的旧窗口过期，再启用新存储。存在永久窗口或无法确认有效期上限时，应继续使用旧存储，直到取得可信的到期时间快照。二进制 GET 返回计数和 CAS，无法区分限时窗口和永久窗口。
+
+独占切换期间可调用 `migrateLegacyWindowFromSnapshot`。先暂停重试客户端并排空在途写入，再传入同一源条目的可信计数和原始 Unix 秒截止时间。只有已确认永久有效的条目才传 0。已过期或目标窗口已存在时返回 false。
+
+独占切换期间也可使用接收源客户端和非零 CAS 的 `migrateLegacyWindowFromSnapshot` 重载。它会核对源条目当前的版本和解码后的计数。源条目消失、版本或计数不匹配、已过期或目标窗口已存在时返回 false。源客户端须采用原路由并连接原进程。采集时须记录同一条目的 CAS、计数和可信截止时间。二进制协议可核对版本和值，截止时间仍来自可信快照。
+
+如果仅支持二进制协议的源节点已在可保留的内存文件上启用 [Memcached 热重启](https://docs.memcached.org/features/restart/)，可在独占切换期间通过现有 Meta Text 导入器读取恢复后的窗口。保持客户端暂停并排空在途写入。向源进程发送 `SIGUSR1` 以正常停机，等待主机时钟超过记录的停机秒数，再使用同一个内存文件和兼容的 slab、CAS 设置重启，并开放隔离的 Meta Text 监听。监听应启用认证或限制为可信本机访问。确认源条目确实恢复后再导入。Memcached 1.6.45 回环测试使用二进制 SASL 写入旧计数，热重启后通过已认证的 Meta Text 连接导入。限时窗口保留原始截止时间，永久窗口仍无截止时间，停机期间过期的窗口仍然缺失。此方式要求在写入旧窗口前已启用热重启。
+
+
+对于 Redisson 3.12.5 的 `RMapCache` 重试区域，在同一独占切换阶段使用原缓存和主体调用 `migrateLegacyWindow`。导入复制原计数、条目固定截止时间、空闲策略和当前空闲截止时间，读取时不延长源窗口。若整个 Map 更早过期，使用更早的截止时间。同一 Redis 部署内使用独立的目标命名空间。
 
 ## 8. Core Usage / API
 

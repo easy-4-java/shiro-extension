@@ -10,6 +10,20 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      redis:
+        image: redis:8.4.0
+        ports:
+          - 6379/tcp
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+      memcached:
+        image: memcached:1.6.45-alpine
+        ports:
+          - 11211/tcp
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-java@v5
@@ -20,18 +34,155 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: easy-4-java/jwt-issuer
-          ref: 6b1a4de65a12a155e98e957ea82e446ef6420b36
+          ref: c6edbf6a56a0c8ae6409b9fc1b0ef9639c4063d1
           path: .ci-dependencies/jwt-issuer
       - name: Verify and install JWT issuer
         run: mvn -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" -f .ci-dependencies/jwt-issuer/pom.xml clean install
       - name: Verify Shiro extension
-        run: mvn -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" clean verify
+        env:
+          RETRY_REDIS_CONTAINER: ${{ job.services.redis.id }}
+          RETRY_REDIS_PORT: ${{ job.services.redis.ports['6379'] }}
+          RETRY_MEMCACHED_PORT: ${{ job.services.memcached.ports['11211'] }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          auth_file=$(mktemp "${RUNNER_TEMP}/memcached-auth.XXXXXX")
+          auth_container=
+          binary_container=
+          warm_container=
+          cleanup() {
+            if [[ -n "$auth_container" ]]; then
+              docker rm -f "$auth_container" >/dev/null
+            fi
+            if [[ -n "$binary_container" ]]; then
+              docker rm -f "$binary_container" >/dev/null
+            fi
+            if [[ -n "$warm_container" ]]; then
+              docker rm -f "$warm_container" >/dev/null
+            fi
+            rm -f "$auth_file"
+          }
+          trap cleanup EXIT
+          # Local CI fixture only. The container reads this as its non-root user.
+          printf '%s\n' 'fixture-user:fixture-password' > "$auth_file"
+          chmod 0644 "$auth_file"
+          auth_container=$(docker run -d --publish 127.0.0.1::11211/tcp \
+            --mount "type=bind,src=$auth_file,dst=/memcached-auth,readonly" \
+            memcached:1.6.45-alpine memcached -U 0 -Y /memcached-auth)
+          binary_container=$(docker run -d --publish 127.0.0.1::11211/tcp \
+            memcached:1.6.45-alpine memcached -U 0 -B binary)
+          warm_container=$(docker run -d --user 0 --publish 127.0.0.1::11211/tcp \
+            --mount "type=bind,src=$auth_file,dst=/memcached-auth,readonly" \
+            --tmpfs /state:rw,size=96m memcached:1.6.45-alpine sh -ec '
+              chown memcache /state
+              mkdir -p /etc/sasl2
+              printf "%s\n" "mech_list: plain" >/etc/sasl2/memcached.conf
+              sed "s/:/@$(hostname):/" /memcached-auth >/state/sasl-auth
+              chown memcache /state/sasl-auth
+              chmod 0600 /state/sasl-auth
+              MEMCACHED_SASL_PWDB=/state/sasl-auth memcached -u memcache -U 0 -m 64 -S -e /state/memory &
+              child=$!
+              echo "$child" >/state/source.pid
+              wait "$child"
+              # The server requires the clock to advance beyond the saved stop second.
+              sleep 2
+              exec memcached -u memcache -U 0 -m 64 -Y /memcached-auth -e /state/memory
+            ')
+          ready_port() {
+            local container=$1 binding port
+            binding=$(docker port "$container" 11211/tcp)
+            port=${binding##*:}
+            [[ "$port" =~ ^[0-9]+$ ]] || return 1
+            for _ in {1..40}; do
+              if (: < "/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+                printf '%s\n' "$port"
+                return
+              fi
+              sleep 0.25
+            done
+            docker logs "$container" >&2
+            return 1
+          }
+          auth_port=$(ready_port "$auth_container")
+          binary_port=$(ready_port "$binary_container")
+          warm_port=$(ready_port "$warm_container")
+          mvn -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" \
+            -Dshiro.redis.test.container="$RETRY_REDIS_CONTAINER" -Dshiro.redis.test.port="$RETRY_REDIS_PORT" \
+            -Dshiro.memcached.test.port="$RETRY_MEMCACHED_PORT" -Dshiro.memcached.auth.test.port="$auth_port" \
+            -Dshiro.memcached.binary.test.port="$binary_port" -Dshiro.memcached.warm.test.port="$warm_port" \
+            -Dshiro.memcached.warm.test.container="$warm_container" clean verify
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          reports = Path("shiro-extension-core/target/surefire-reports")
+          suite = ElementTree.parse(next(reports.glob("TEST-*J2CacheMemcachedCredentialRetryStoreIntegrationTest.xml")))
+          for name in (
+              "importsThroughAnAuthenticatedMetaConnectionWithItsOriginalDeadline",
+              "refusesToImportWhenOnlyTheBinaryProtocolCanReadTheCounter",
+              "importsAuthoritativeSnapshotWithTheOriginalServerDeadline",
+              "importsLegacyWindowsAfterSaslSourceWarmRestart",
+          ):
+              case = suite.find(f'./testcase[@name="{name}"]')
+              if case is None or any(case.find(status) is not None for status in ("failure", "error", "skipped")):
+                  raise SystemExit(f"Expected an executed, successful Memcached test: {name}")
+          PYTHON
+      - name: Verify J2Cache and Redisson retry migration on Redis Cluster
+        shell: bash
+        run: |
+          set -euo pipefail
+          containers=()
+          trap 'if (( ${#containers[@]} > 0 )); then docker rm -f "${containers[@]}" >/dev/null; fi' EXIT
+          nodes=()
+          for port in 16380 16381 16382; do
+            container=$(docker run -d --rm --network host redis:8.4.0 redis-server \
+              --bind 127.0.0.1 --port "$port" --cluster-enabled yes \
+              --cluster-announce-ip 127.0.0.1 --cluster-config-file nodes.conf \
+              --save '' --appendonly no)
+            containers+=("$container")
+            nodes+=("127.0.0.1:$port")
+            for attempt in {1..60}; do
+              if docker exec "$container" redis-cli -p "$port" ping | grep -qx PONG; then
+                break
+              fi
+              if (( attempt == 60 )); then
+                docker logs "$container"
+                exit 1
+              fi
+              sleep 0.25
+            done
+          done
+          timeout 30s docker exec "${containers[0]}" redis-cli --cluster create "${nodes[@]}" --cluster-replicas 0 --cluster-yes
+          cluster_nodes=$(IFS=,; printf '%s' "${nodes[*]}")
+          mvn -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" \
+            -pl shiro-extension-core -Dshiro.redis.test.cluster.nodes="$cluster_nodes" \
+            '-Dtest=J2CacheRedisClusterMigrationTest,RedissonCredentialRetryStoreIntegrationTest#migratesTheLegacyMapEntryWithoutRefreshingItsIdleDeadline+keepsMapExpiryAndImportsPersistentZeroCounts' test
+          mvn -B -ntp -s .github/maven-central-settings.xml -Dmaven.repo.local="${RUNNER_TEMP}/verified-m2" \
+            -pl shiro-extension-core -Dshiro.redis.test.cluster.nodes="$cluster_nodes" \
+            -Dshiro.test.fileEncoding=ISO-8859-1 -Dshiro.redis.test.expectedCharset=ISO-8859-1 \
+            -Dsurefire.reportNameSuffix=latin1 -Dtest=J2CacheRedisClusterMigrationTest test
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          report = Path("shiro-extension-core/target/surefire-reports")
+          for name in ("J2CacheRedisClusterMigrationTest", "J2CacheRedisClusterMigrationTest-latin1", "RedissonCredentialRetryStoreIntegrationTest"):
+              suite = ElementTree.parse(next(report.glob(f"TEST-*{name}.xml"))).getroot()
+              if tuple(suite.get(key) for key in ("tests", "failures", "errors", "skipped")) != ("2", "0", "0", "0"):
+                  raise SystemExit(f"Expected two Redis Cluster migration tests without skips in {name}")
+          PYTHON
       - name: Require coverage for modules with existing tests
         run: |
           test -s .ci-dependencies/jwt-issuer/jwt-issuer-with-jjwt/target/jacoco.exec
           test -s .ci-dependencies/jwt-issuer/jwt-issuer-with-jjwt/target/site/jacoco/jacoco.xml
           test -s shiro-extension-core/target/jacoco.exec
           test -s shiro-extension-core/target/site/jacoco/jacoco.xml
+          test -s shiro-extension-spring/target/jacoco.exec
+          test -s shiro-extension-spring/target/site/jacoco/jacoco.xml
+          test -s shiro-extension-hazelcast3/target/jacoco.exec
+          test -s shiro-extension-hazelcast3/target/site/jacoco/jacoco.xml
+          test -s shiro-extension-spring-redis4/target/jacoco.exec
+          test -s shiro-extension-spring-redis4/target/site/jacoco/jacoco.xml
       - uses: actions/upload-artifact@v7
         if: always()
         with:

@@ -22,6 +22,7 @@ import org.apache.shiro.authc.credential.HashedCredentialsMatcher;
 import org.apache.shiro.cache.Cache;
 import org.apache.shiro.cache.CacheManager;
 
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -54,8 +55,32 @@ public class CredentialsRetryLimitCredentialsMatcher extends HashedCredentialsMa
      */
 	protected String credentialsRetryCacheName = CREDENTIALS_RETRY_CACHE_NAME;
 
+    private volatile CredentialRetryStore credentialRetryStore;
+
+    /**
+     * Configures atomic retry accounting for this matcher's retry cache namespace.
+     *
+     * @param store provider-backed store, or null to use the existing Shiro cache integration
+     */
+    public void setCredentialRetryStore(CredentialRetryStore store) {
+        this.credentialRetryStore = store;
+    }
+
+    /**
+     * @return the configured retry store, or null when using the Shiro retry cache
+     */
+    public CredentialRetryStore getCredentialRetryStore() {
+        return credentialRetryStore;
+    }
+
     @Override
     public boolean doCredentialsMatch(AuthenticationToken token, AuthenticationInfo info) {
+        CredentialRetryStore store = credentialRetryStore;
+        if (Objects.nonNull(store)) {
+            return CredentialRetrySupport.match(store, token.getPrincipal(), getCredentialsRetryTimesLimit(),
+                    () -> super.doCredentialsMatch(token, info));
+        }
+
 		
 		AtomicInteger retryCount = getCachedRetryTimes(token.getPrincipal());
 		if (retryCount == null) {
@@ -109,11 +134,11 @@ public class CredentialsRetryLimitCredentialsMatcher extends HashedCredentialsMa
 		this.credentialsRetryCacheName = credentialsRetryCacheName;
 	}
 	
-	public void setCredentialsRetryTimes(Cache<Object, AtomicInteger> credentialsRetryTimes) {
+	public synchronized void setCredentialsRetryTimes(Cache<Object, AtomicInteger> credentialsRetryTimes) {
 		this.credentialsRetryTimes = credentialsRetryTimes;
 	}
 
-	private Cache<Object, AtomicInteger> getCredentialsRetryCacheLazy() {
+	private synchronized Cache<Object, AtomicInteger> getCredentialsRetryCacheLazy() {
         if (this.credentialsRetryTimes == null) {
             this.credentialsRetryTimes = createCredentialsRetryCache();
         }
