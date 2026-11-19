@@ -10,7 +10,11 @@ name: CI
 
 on:
   push:
-    branches: [feature/3.0.x, feature/REQ-20261118-wandl-shiro-auth-3x]
+    branches:
+      - feature/3.0.x
+      - feature/REQ-20261118-wandl-shiro-auth-3x
+      - feature/REQ-20261119-wandl-ehcache3-shiro3
+      - test/20261119-3.0.x
   pull_request:
     branches: [feature/3.0.x]
   workflow_dispatch:
@@ -138,6 +142,7 @@ jobs:
           for name in (
               "importsThroughAnAuthenticatedMetaConnectionWithItsOriginalDeadline",
               "refusesToImportWhenOnlyTheBinaryProtocolCanReadTheCounter",
+              "importsAuthoritativeSnapshotWithTheOriginalServerDeadline",
               "importsLegacyWindowsAfterBinarySourceWarmRestart",
           ):
               case = suite.find(f'./testcase[@name="{name}"]')
@@ -192,7 +197,7 @@ jobs:
 
       - name: Require coverage for modules with tests
         run: |
-          for module in shiro-extension-core shiro-extension-spring shiro-extension-hazelcast3 shiro-extension-spring-redis4; do
+          for module in shiro-extension-core shiro-extension-spring shiro-extension-hazelcast3 shiro-extension-spring-redis4 shiro-extension-ehcache3; do
             test -s "${module}/target/jacoco.exec"
             test -s "${module}/target/site/jacoco/jacoco.xml"
           done

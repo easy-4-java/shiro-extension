@@ -203,10 +203,11 @@ public class J2CacheMemcachedCredentialRetryStoreIntegrationTest {
         String legacyKey = REGION + ":" + principal;
         String target = "shiro-retry:" + digest(namespace) + ":" + digest(principal);
         SerializingTranscoder transcoder = new SerializingTranscoder();
+        int sourceDeadline = Math.toIntExact(Instant.now().getEpochSecond() + 120);
         byte[] counter = SerializationUtils.serialize(new AtomicInteger(3));
         MemcachedClient legacy = client(binaryEndpoint);
         try (CacheChannel channel = J2CacheTestChannel.open(config)) {
-            assertTrue(legacy.set(legacyKey, 120, counter, transcoder));
+            assertTrue(legacy.set(legacyKey, sourceDeadline, counter, transcoder));
             byte[] storedCounter = (byte[]) legacy.get(legacyKey, transcoder);
             assertEquals(3, ((AtomicInteger) SerializationUtils.deserialize(storedCounter)).get());
             long originalCas = legacy.gets(legacyKey, transcoder).getCas();
@@ -215,9 +216,58 @@ public class J2CacheMemcachedCredentialRetryStoreIntegrationTest {
             assertThrows(CacheException.class,
                     () -> store.migrateLegacyWindow(principal, AddrUtil.getOneAddress(binaryEndpoint)));
             assertNull(firstClient.get(target, new StringTranscoder()));
-            assertEquals(originalCas, legacy.gets(legacyKey, transcoder).getCas());
+            assertThrows(IllegalArgumentException.class,
+                    () -> store.migrateLegacyWindowFromSnapshot(principal, legacy, 0, 3, sourceDeadline));
+            assertFalse(store.migrateLegacyWindowFromSnapshot("missing", legacy, originalCas, 3, sourceDeadline));
+            assertFalse(store.migrateLegacyWindowFromSnapshot(principal, legacy, originalCas, 2, sourceDeadline));
+            assertNull(firstClient.get(target, new StringTranscoder()));
+            assertTrue(legacy.set(legacyKey, sourceDeadline, counter, transcoder));
+            long currentCas = legacy.gets(legacyKey, transcoder).getCas();
+            assertNotEquals(originalCas, currentCas);
+            assertFalse(store.migrateLegacyWindowFromSnapshot(principal, legacy, originalCas, 3, sourceDeadline));
+            assertNull(firstClient.get(target, new StringTranscoder()));
+
+            assertTrue(store.migrateLegacyWindowFromSnapshot(principal, legacy, currentCas, 3, sourceDeadline));
+            assertFalse(store.migrateLegacyWindowFromSnapshot(principal, legacy, currentCas, 3, sourceDeadline));
+            Attempt migrated = store.reserve(principal);
+            assertEquals(4, migrated.getCount());
+            assertEquals(sourceDeadline + ":4:" + migrated.getWindowId(), firstClient.get(target, new StringTranscoder()));
+            assertEquals(currentCas, legacy.gets(legacyKey, transcoder).getCas());
         } finally {
             legacy.shutdown();
+        }
+    }
+
+    @Test
+    public void importsAuthoritativeSnapshotWithTheOriginalServerDeadline() throws Exception {
+        J2CacheConfig config = config(true, "30s");
+        try (CacheChannel channel = J2CacheTestChannel.open(config)) {
+            J2CacheMemcachedCredentialRetryStore store = store(channel, config, firstClient);
+            String principal = "snapshot-" + UUID.randomUUID();
+            String persistent = principal + "-persistent";
+            String expired = principal + "-expired";
+            int deadline = Math.toIntExact(Instant.now().getEpochSecond() + 90);
+            assertThrows(IllegalArgumentException.class,
+                    () -> store.migrateLegacyWindowFromSnapshot(principal, -1, deadline));
+            assertThrows(IllegalArgumentException.class,
+                    () -> store.migrateLegacyWindowFromSnapshot(principal, 3, -1));
+            assertThrows(IllegalArgumentException.class,
+                    () -> store.migrateLegacyWindowFromSnapshot(principal, 3, Integer.MAX_VALUE + 1L));
+            assertTrue(store.migrateLegacyWindowFromSnapshot(principal, 3, deadline));
+            assertFalse(store.migrateLegacyWindowFromSnapshot(principal, 6, deadline + 5L));
+            assertTrue(store.migrateLegacyWindowFromSnapshot(persistent, 0, 0));
+            assertFalse(store.migrateLegacyWindowFromSnapshot(expired, 7, deadline - 91L));
+            assertNull(firstClient.get("shiro-retry:" + digest(namespace) + ":" + digest(expired),
+                    new StringTranscoder()));
+
+            Attempt next = store.reserve(principal);
+            Attempt persistentAttempt = store.reserve(persistent);
+            assertEquals(4, next.getCount());
+            assertEquals(1, persistentAttempt.getCount());
+            String target = "shiro-retry:" + digest(namespace) + ":" + digest(principal);
+            String persistentKey = "shiro-retry:" + digest(namespace) + ":" + digest(persistent);
+            assertEquals(deadline + ":4:" + next.getWindowId(), firstClient.get(target, new StringTranscoder()));
+            assertStoredDeadlines(target, deadline, persistentKey);
         }
     }
 

@@ -224,6 +224,7 @@
     </dependencyManagement>
     <subprojects>
         <subproject>shiro-extension-core</subproject>
+        <subproject>shiro-extension-ehcache3</subproject>
         <subproject>shiro-extension-hazelcast3</subproject>
         <subproject>shiro-extension-spring-redis4</subproject>
         <subproject>shiro-extension-spring</subproject>
