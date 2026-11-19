@@ -160,6 +160,24 @@ public final class J2CacheMemcachedCredentialRetryStore implements CredentialRet
         });
     }
 
+    /**
+     * Imports a verified legacy counter and its original deadline during an exclusive cutover.
+     * Pause retry clients and drain outstanding writes before taking the snapshot. Supply the
+     * count and deadline from the same source entry and use zero only for a persistent entry.
+     *
+     * @param principal original string principal in the J2Cache region
+     * @param count original nonnegative retry count
+     * @param deadlineEpochSecond original absolute expiry, or zero for a persistent entry
+     * @return true when an active snapshot was copied to an empty destination
+     */
+    public boolean migrateLegacyWindowFromSnapshot(String principal, int count, long deadlineEpochSecond) {
+        if (count < 0 || deadlineEpochSecond < 0 || deadlineEpochSecond > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("Invalid Memcached snapshot retry count or expiry");
+        }
+        MemcachedLegacyWindow legacy = new MemcachedLegacyWindow(count, (int) deadlineEpochSecond);
+        return migrateLegacyWindow(principal, ignored -> legacy);
+    }
+
     private boolean migrateLegacyWindow(String principal, LegacyRead source) {
         Objects.requireNonNull(principal, "principal");
         try {
