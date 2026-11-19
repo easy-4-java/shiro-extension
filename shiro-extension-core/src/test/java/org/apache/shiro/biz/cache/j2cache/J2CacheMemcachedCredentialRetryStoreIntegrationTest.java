@@ -216,9 +216,23 @@ public class J2CacheMemcachedCredentialRetryStoreIntegrationTest {
             assertThrows(CacheException.class,
                     () -> store.migrateLegacyWindow(principal, AddrUtil.getOneAddress(binaryEndpoint)));
             assertNull(firstClient.get(target, new StringTranscoder()));
-            assertTrue(store.migrateLegacyWindowFromSnapshot(principal, 3, sourceDeadline));
-            assertEquals(4, store.reserve(principal).getCount());
-            assertEquals(originalCas, legacy.gets(legacyKey, transcoder).getCas());
+            assertThrows(IllegalArgumentException.class,
+                    () -> store.migrateLegacyWindowFromSnapshot(principal, legacy, 0, 3, sourceDeadline));
+            assertFalse(store.migrateLegacyWindowFromSnapshot("missing", legacy, originalCas, 3, sourceDeadline));
+            assertFalse(store.migrateLegacyWindowFromSnapshot(principal, legacy, originalCas, 2, sourceDeadline));
+            assertNull(firstClient.get(target, new StringTranscoder()));
+            assertTrue(legacy.set(legacyKey, sourceDeadline, counter, transcoder));
+            long currentCas = legacy.gets(legacyKey, transcoder).getCas();
+            assertNotEquals(originalCas, currentCas);
+            assertFalse(store.migrateLegacyWindowFromSnapshot(principal, legacy, originalCas, 3, sourceDeadline));
+            assertNull(firstClient.get(target, new StringTranscoder()));
+
+            assertTrue(store.migrateLegacyWindowFromSnapshot(principal, legacy, currentCas, 3, sourceDeadline));
+            assertFalse(store.migrateLegacyWindowFromSnapshot(principal, legacy, currentCas, 3, sourceDeadline));
+            Attempt migrated = store.reserve(principal);
+            assertEquals(4, migrated.getCount());
+            assertEquals(sourceDeadline + ":4:" + migrated.getWindowId(), firstClient.get(target, new StringTranscoder()));
+            assertEquals(currentCas, legacy.gets(legacyKey, transcoder).getCas());
         } finally {
             legacy.shutdown();
         }

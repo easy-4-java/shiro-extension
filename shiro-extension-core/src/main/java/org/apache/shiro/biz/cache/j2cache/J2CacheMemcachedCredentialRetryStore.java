@@ -171,11 +171,38 @@ public final class J2CacheMemcachedCredentialRetryStore implements CredentialRet
      * @return true when an active snapshot was copied to an empty destination
      */
     public boolean migrateLegacyWindowFromSnapshot(String principal, int count, long deadlineEpochSecond) {
+        MemcachedLegacyWindow legacy = verifiedSnapshot(count, deadlineEpochSecond);
+        return migrateLegacyWindow(principal, ignored -> legacy);
+    }
+
+    /**
+     * Imports an authoritative expiry snapshot after checking the live source version and count.
+     * Pause retry clients and drain outstanding writes before collecting and importing the snapshot.
+     * The binary protocol can check the entry version and value. The original deadline must come
+     * from the same trusted snapshot. Read the original process before it restarts or the key moves.
+     *
+     * @param principal original string principal in the J2Cache region
+     * @param source caller-managed client on the legacy servers with the original routing and authentication
+     * @param sourceCas nonzero CAS of the source entry recorded with the snapshot
+     * @param count original nonnegative retry count
+     * @param deadlineEpochSecond original absolute expiry, or zero for a persistent entry
+     * @return true when the matching active entry was copied to an empty destination
+     */
+    public boolean migrateLegacyWindowFromSnapshot(String principal, MemcachedClient source, long sourceCas,
+                                                    int count, long deadlineEpochSecond) {
+        Objects.requireNonNull(source, "source");
+        if (sourceCas == 0) {
+            throw new IllegalArgumentException("The Memcached snapshot requires a nonzero source CAS");
+        }
+        MemcachedLegacyWindow legacy = verifiedSnapshot(count, deadlineEpochSecond);
+        return migrateLegacyWindow(principal, key -> MemcachedLegacyWindow.readMatchingVersion(source, key, sourceCas, legacy));
+    }
+
+    private static MemcachedLegacyWindow verifiedSnapshot(int count, long deadlineEpochSecond) {
         if (count < 0 || deadlineEpochSecond < 0 || deadlineEpochSecond > Integer.MAX_VALUE) {
             throw new IllegalArgumentException("Invalid Memcached snapshot retry count or expiry");
         }
-        MemcachedLegacyWindow legacy = new MemcachedLegacyWindow(count, (int) deadlineEpochSecond);
-        return migrateLegacyWindow(principal, ignored -> legacy);
+        return new MemcachedLegacyWindow(count, (int) deadlineEpochSecond);
     }
 
     private boolean migrateLegacyWindow(String principal, LegacyRead source) {
@@ -202,7 +229,8 @@ public final class J2CacheMemcachedCredentialRetryStore implements CredentialRet
     @FunctionalInterface
     private interface LegacyRead {
 
-        MemcachedLegacyWindow read(String key) throws IOException;
+        MemcachedLegacyWindow read(String key)
+                throws IOException, InterruptedException, TimeoutException, MemcachedException;
     }
 
     private Window newWindow() {
