@@ -110,6 +110,7 @@ Maven 父工程构建以下模块。
 | :--- | :--- |
 | `shiro-extension-core` | 不依赖 Spring 的 Shiro 认证、授权、缓存、会话、Servlet 与工具扩展 |
 | `shiro-extension-spring` | Spring 处理器、过滤器、消息源、调度和 Shiro-Spring 集成；依赖 core |
+| `shiro-extension-ehcache3` | 面向 Shiro 3 的可选原生 Ehcache 3 适配器，使用 Jakarta JAXB，保留已配置的缓存区域和过期策略。 |
 | `shiro-extension-hazelcast3` | 可选的 Hazelcast 3.12 IMap 重试计数适配 |
 | `shiro-extension-spring-redis4` | 可选的 Spring Data Redis 4 重试计数适配 |
 
