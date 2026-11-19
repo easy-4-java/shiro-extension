@@ -9,15 +9,19 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.Objects;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import lombok.Value;
 import net.oschina.j2cache.util.SerializationUtils;
+import net.rubyeye.xmemcached.GetsResponse;
+import net.rubyeye.xmemcached.MemcachedClient;
+import net.rubyeye.xmemcached.exception.MemcachedException;
 import net.rubyeye.xmemcached.transcoders.CachedData;
 import net.rubyeye.xmemcached.transcoders.SerializingTranscoder;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.shiro.cache.CacheException;
 
-/** A read-only Memcached meta snapshot of the original J2Cache entry. */
+/** The original J2Cache retry count and Memcached deadline. */
 @Value
 class MemcachedLegacyWindow {
 
@@ -85,6 +89,20 @@ class MemcachedLegacyWindow {
 
     private static MemcachedLegacyWindow decode(byte[] payload, int flags, int deadline) throws IOException {
         Object raw = TRANSCODER.decode(new CachedData(flags, payload));
+        return new MemcachedLegacyWindow(counterValue(raw), deadline);
+    }
+
+    static MemcachedLegacyWindow readMatchingVersion(MemcachedClient source, String key, long sourceCas,
+                                                     MemcachedLegacyWindow expected)
+            throws TimeoutException, InterruptedException, MemcachedException, IOException {
+        GetsResponse<Object> current = source.gets(key, TRANSCODER);
+        if (Objects.isNull(current) || current.getCas() != sourceCas) {
+            return null;
+        }
+        return counterValue(current.getValue()) == expected.getCount() ? expected : null;
+    }
+
+    private static int counterValue(Object raw) throws IOException {
         if (!(raw instanceof byte[])) {
             throw new CacheException("Legacy Memcached value must contain J2Cache bytes");
         }
@@ -92,7 +110,7 @@ class MemcachedLegacyWindow {
         if (!(counter instanceof AtomicInteger) || ((AtomicInteger) counter).get() < 0) {
             throw new CacheException("Legacy Memcached value must contain a nonnegative retry counter");
         }
-        return new MemcachedLegacyWindow(((AtomicInteger) counter).get(), deadline);
+        return ((AtomicInteger) counter).get();
     }
 
     private static long time(DataInputStream input, OutputStream output) throws IOException {
