@@ -135,6 +135,27 @@ public final class Ehcache3CredentialRetryStore<K> implements CredentialRetrySto
         return Objects.nonNull(cache.replace(key, migrated));
     }
 
+    /**
+     * Converts a live retry window back to a legacy counter while retaining its expiry.
+     * Pause all retry clients and drain outstanding writes before restoring the region.
+     *
+     * @param principal original principal in the Ehcache region
+     * @return true when a live retry window was restored
+     */
+    public boolean restoreLegacyWindow(Object principal) {
+        if (!cache.getRuntimeConfiguration().getValueType().isAssignableFrom(AtomicInteger.class)) {
+            throw new IllegalArgumentException("Ehcache retry region must accept legacy counters");
+        }
+        K key = key(principal);
+        Object value = cache.get(key);
+        Attempt attempt = storedAttempt(value);
+        if (Objects.isNull(attempt) && !isMigratedZero(value)) {
+            return false;
+        }
+        int count = Objects.nonNull(attempt) ? attempt.getCount() : 0;
+        return cache.replace(key, value, new AtomicInteger(count));
+    }
+
     private Object storeValue(Attempt attempt) {
         return usesTypedCounters ? new TypedCounter(attempt.getWindowId(), attempt.getCount()) : attempt;
     }

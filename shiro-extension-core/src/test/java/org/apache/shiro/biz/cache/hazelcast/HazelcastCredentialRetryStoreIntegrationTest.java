@@ -7,9 +7,6 @@ import com.hazelcast.core.EntryView;
 import com.hazelcast.core.Hazelcast;
 import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.map.IMap;
-import java.io.IOException;
-import java.net.InetAddress;
-import java.net.ServerSocket;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -37,18 +34,22 @@ public class HazelcastCredentialRetryStoreIntegrationTest {
     private static HazelcastInstance second;
 
     @BeforeClass
-    public static void startCluster() throws IOException {
+    public static void startCluster() {
         String cluster = "shiro-map-" + UUID.randomUUID();
-        int firstPort;
-        int secondPort;
-        try (ServerSocket a = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
-             ServerSocket b = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
-            firstPort = a.getLocalPort();
-            secondPort = b.getLocalPort();
-        }
-        first = Hazelcast.newHazelcastInstance(member(cluster, firstPort, secondPort));
-        second = Hazelcast.newHazelcastInstance(member(cluster, secondPort, firstPort));
+        first = Hazelcast.newHazelcastInstance(member(cluster));
+        int firstPort = first.getCluster().getLocalMember().getAddress().getPort();
+
+        Config joiningMember = member(cluster);
+        joiningMember.getNetworkConfig().getJoin().getTcpIpConfig()
+                .addMember("127.0.0.1:" + firstPort);
+        second = Hazelcast.newHazelcastInstance(joiningMember);
+        int secondPort = second.getCluster().getLocalMember().getAddress().getPort();
+
+        assertTrue(firstPort > 0);
+        assertTrue(secondPort > 0);
+        assertNotEquals(firstPort, secondPort);
         assertEquals(2, first.getCluster().getMembers().size());
+        assertEquals(2, second.getCluster().getMembers().size());
     }
 
     @AfterClass
@@ -171,7 +172,7 @@ public class HazelcastCredentialRetryStoreIntegrationTest {
         }
     }
 
-    private static Config member(String cluster, int ownPort, int otherPort) {
+    private static Config member(String cluster) {
         Config config = new Config().setClusterName(cluster);
         config.setProperty("hazelcast.logging.type", "none");
         config.setProperty("hazelcast.operation.thread.count", "2");
@@ -183,11 +184,11 @@ public class HazelcastCredentialRetryStoreIntegrationTest {
         config.addMapConfig(new MapConfig("ttl").setTimeToLiveSeconds(3).setMaxIdleSeconds(10));
         config.addMapConfig(new MapConfig("idle").setMaxIdleSeconds(2));
         NetworkConfig network = config.getNetworkConfig();
-        network.setPort(ownPort).setPortAutoIncrement(false);
+        network.setPort(0).setPortAutoIncrement(false);
         network.getInterfaces().setEnabled(true).addInterface("127.0.0.1");
         network.getJoin().getAutoDetectionConfig().setEnabled(false);
         network.getJoin().getMulticastConfig().setEnabled(false);
-        network.getJoin().getTcpIpConfig().setEnabled(true).addMember("127.0.0.1:" + otherPort);
+        network.getJoin().getTcpIpConfig().setEnabled(true);
         return config;
     }
 }
